@@ -25,7 +25,7 @@ const pool = new Pool({
     database: 'postgres',
     ssl: {
         rejectUnauthorized: false,
-        ca: process.env.NODE_ENV === 'production' 
+        ca: process.env.NODE_ENV === 'production'
             ? fs.readFileSync('/app/rds-ca-bundle.pem').toString()
             : undefined,
     },
@@ -64,10 +64,8 @@ async function initializeSecrets() {
         } else {
             console.warn('SES credentials not found or incomplete; email functionality disabled');
         }
-
         const jwtSecret = await getSecret('chatpay/jwt-secret');
         process.env.JWT_SECRET = jwtSecret?.JWT_SECRET || 'default-jwt-secret';
-
         const stripeSecret = await getSecret('chatpay/stripe-secret-key');
         if (stripeSecret && stripeSecret.STRIPE_SECRET_KEY) {
             process.env.STRIPE_SECRET_KEY = stripeSecret.STRIPE_SECRET_KEY;
@@ -76,7 +74,6 @@ async function initializeSecrets() {
         } else {
             console.warn('Stripe secret key not found or incomplete; payment functionality disabled');
         }
-
         return true;
     } catch (error) {
         console.error('Failed to initialize secrets:', error.message);
@@ -90,6 +87,17 @@ initializeSecrets().then(success => {
     }
 });
 
+const convertAmount = (amount, fromCurrency, toCurrency) => {
+    if (fromCurrency === toCurrency) return amount;
+    const rates = {
+        USD: { NGN: 1600, EUR: 0.85, CNY: 7.1 },
+        NGN: { USD: 1/1600, EUR: 0.00053125, CNY: 0.0044375 },
+        EUR: { USD: 1.176, NGN: 1882.35, CNY: 8.35 },
+        CNY: { USD: 0.1408, NGN: 225.35, EUR: 0.1198 },
+    };
+    return Math.round(amount * rates[fromCurrency][toCurrency] * 100) / 100;
+};
+
 app.get('/health', async (req, res) => {
     try {
         await pool.query('SELECT 1');
@@ -101,7 +109,7 @@ app.get('/health', async (req, res) => {
 });
 
 app.post('/signup', async (req, res) => {
-    const { email, password, name, surname } = req.body;
+    const { email, password, name, surname, gender, phone, dob } = req.body;
     if (!email || !password || !name || !surname) {
         return res.status(400).json({ error: 'Name, Surname, Email, and Password are required' });
     }
@@ -109,14 +117,21 @@ app.post('/signup', async (req, res) => {
         const hashedPassword = await bcrypt.hash(password, 10);
         const userId = uuidv4();
         await pool.query(
-            'INSERT INTO users (id, email, password, name, surname) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (email) DO NOTHING',
-            [userId, email, hashedPassword, name, surname]
+            'INSERT INTO users (id, email, password, name, surname, gender, phone, dob) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (email) DO NOTHING',
+            [userId, email, hashedPassword, name, surname, gender || null, phone || null, dob || null]
         );
         const result = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
         if (result.rows.length === 0) {
             return res.status(400).json({ error: 'Email already exists' });
         }
         const token = jwt.sign({ user_id: userId }, process.env.JWT_SECRET, { expiresIn: '1h' });
+        const currencies = ['USD', 'NGN', 'EUR', 'CNY'];
+        for (const currency of currencies) {
+            await pool.query(
+                'INSERT INTO wallets (id, user_id, balance, currency, status, created_at) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (user_id, currency) DO NOTHING',
+                [uuidv4(), userId, 0, currency, 'active', new Date()]
+            );
+        }
         res.json({ token });
     } catch (error) {
         console.error('Signup failed:', error.message);
@@ -226,6 +241,26 @@ app.get('/wallet/balance', async (req, res) => {
     }
 });
 
+app.get('/recent-transactions', async (req, res) => {
+    const token = req.headers.authorization?.split('Bearer ')[1];
+    if (!token) return res.status(401).json({ error: 'Missing token' });
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const rows = await pool.query(
+            `SELECT payment_intent_id AS id, amount, currency, status AS type, created_at 
+             FROM payments 
+             WHERE sender_id = $1 OR receiver_id = $1 
+             ORDER BY created_at DESC 
+             LIMIT 5`,
+            [decoded.user_id]
+        );
+        res.json(rows.rows);
+    } catch (error) {
+        console.error('Recent transactions failed:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 app.get('/payments/received', async (req, res) => {
     const token = req.headers.authorization?.split('Bearer ')[1];
     if (!token) return res.status(401).json({ error: 'Missing token' });
@@ -258,6 +293,24 @@ app.get('/list-payments', async (req, res) => {
     }
 });
 
+app.post('/user-by-email', async (req, res) => {
+    const { email } = req.body;
+    const token = req.headers.authorization?.split('Bearer ')[1];
+    if (!token) return res.status(401).json({ error: 'Missing token' });
+    if (!email) return res.status(400).json({ error: 'Email is required' });
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const result = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        res.json({ user_id: result.rows[0].id });
+    } catch (error) {
+        console.error('User lookup failed:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 app.post('/create-payment', async (req, res) => {
     const token = req.headers.authorization?.split('Bearer ')[1];
     if (!token) return res.status(401).json({ error: 'Missing token' });
@@ -265,27 +318,67 @@ app.post('/create-payment', async (req, res) => {
     if (!amount || !currency || !sender_id || !receiver_id) {
         return res.status(400).json({ error: 'Amount, currency, sender_id, and receiver_id are required' });
     }
+    if (!['USD', 'NGN', 'EUR', 'CNY'].includes(currency)) {
+        return res.status(400).json({ error: 'Invalid currency. Must be USD, NGN, EUR, or CNY' });
+    }
+    if (amount < 1 || amount > 500) {
+        return res.status(400).json({ error: `Amount must be between 1 and 500 ${currency}` });
+    }
     if (!stripeClient) return res.status(503).json({ error: 'Stripe service is not available' });
     try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        // Validate sender_id and receiver_id exist
-        const senderCheck = await pool.query('SELECT id FROM users WHERE id = $1', [sender_id]);
-        if (senderCheck.rows.length === 0) {
-            return res.status(400).json({ error: 'Invalid sender_id' });
+        if (decoded.user_id !== sender_id) {
+            return res.status(403).json({ error: 'Unauthorized sender' });
         }
-        const receiverCheck = await pool.query('SELECT id FROM users WHERE id = $1', [receiver_id]);
-        if (receiverCheck.rows.length === 0) {
-            return res.status(400).json({ error: 'Invalid receiver_id' });
+        const senderWallet = await pool.query(
+            'SELECT balance FROM wallets WHERE user_id = $1 AND currency = $2 AND status = $3',
+            [sender_id, currency, 'active']
+        );
+        if (senderWallet.rows.length === 0) {
+            return res.status(404).json({ error: 'Sender wallet not found' });
         }
-        const pi = await stripeClient.paymentIntents.create({ amount, currency, payment_method_types: ['card'] });
-        const exists = await pool.query('SELECT EXISTS(SELECT 1 FROM payments WHERE payment_intent_id = $1)', [pi.id]);
-        if (!exists.rows[0].exists) {
-            await pool.query(
-                'INSERT INTO payments (payment_intent_id, sender_id, receiver_id, amount, currency, status, method) VALUES ($1, $2, $3, $4, $5, $6, $7)',
-                [pi.id, sender_id, receiver_id, amount / 100, currency, pi.status, 'card']
+        if (senderWallet.rows[0].balance < amount) {
+            return res.status(400).json({ error: 'Insufficient balance' });
+        }
+        const receiverWallet = await pool.query(
+            'SELECT id FROM wallets WHERE user_id = $1 AND currency = $2 AND status = $3',
+            [receiver_id, currency, 'active']
+        );
+        if (receiverWallet.rows.length === 0) {
+            return res.status(404).json({ error: 'Receiver wallet not found' });
+        }
+        const amountInUsd = currency === 'USD' ? amount : convertAmount(amount, currency, 'USD');
+        const amountInCents = Math.round(amountInUsd * 100);
+        const paymentIntent = await stripeClient.paymentIntents.create({
+            amount: amountInCents,
+            currency: 'usd',
+            payment_method_types: ['card'],
+            metadata: { sender_id, receiver_id, original_currency: currency, original_amount: amount },
+        });
+        const client = await pool.connect();
+        try {
+            await client.query('BEGIN');
+            await client.query(
+                'UPDATE wallets SET balance = balance - $1 WHERE user_id = $2 AND currency = $3',
+                [amount, sender_id, currency]
             );
+            await client.query(
+                'UPDATE wallets SET balance = balance + $1 WHERE user_id = $2 AND currency = $3',
+                [amount, receiver_id, currency]
+            );
+            await client.query(
+                'INSERT INTO payments (payment_intent_id, amount, currency, sender_id, receiver_id, status, method, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+                [paymentIntent.id, amount, currency, sender_id, receiver_id, 'succeeded', 'card', new Date()]
+            );
+            await client.query('COMMIT');
+            res.json({ message: 'Payment created successfully', paymentIntentId: paymentIntent.id });
+        } catch (error) {
+            await client.query('ROLLBACK');
+            console.error('Create payment failed:', error.message);
+            res.status(500).json({ error: error.message });
+        } finally {
+            client.release();
         }
-        res.json({ paymentIntentId: pi.id, amount: amount / 100, currency, status: pi.status, createdAt: new Date().toISOString() });
     } catch (error) {
         console.error('Create payment failed:', error.message);
         res.status(500).json({ error: error.message });
@@ -299,24 +392,220 @@ app.post('/request-payment', async (req, res) => {
     if (!amount || !currency || !requester_id || !target_id) {
         return res.status(400).json({ error: 'Amount, currency, requester_id, and target_id are required' });
     }
+    if (!['USD', 'NGN', 'EUR', 'CNY'].includes(currency)) {
+        return res.status(400).json({ error: 'Invalid currency. Must be USD, NGN, EUR, or CNY' });
+    }
+    if (amount < 1 || amount > 500) {
+        return res.status(400).json({ error: `Amount must be between 1 and 500 ${currency}` });
+    }
     try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        // Validate requester_id and target_id exist
-        const requesterCheck = await pool.query('SELECT id FROM users WHERE id = $1', [requester_id]);
-        if (requesterCheck.rows.length === 0) {
-            return res.status(400).json({ error: 'Invalid requester_id' });
+        if (decoded.user_id !== requester_id) {
+            return res.status(403).json({ error: 'Unauthorized requester' });
         }
-        const targetCheck = await pool.query('SELECT id FROM users WHERE id = $1', [target_id]);
-        if (targetCheck.rows.length === 0) {
-            return res.status(400).json({ error: 'Invalid target_id' });
+        const requesterWallet = await pool.query(
+            'SELECT id FROM wallets WHERE user_id = $1 AND currency = $2 AND status = $3',
+            [requester_id, currency, 'active']
+        );
+        if (requesterWallet.rows.length === 0) {
+            return res.status(404).json({ error: 'Requester wallet not found' });
         }
+        const targetWallet = await pool.query(
+            'SELECT id FROM wallets WHERE user_id = $1 AND currency = $2 AND status = $3',
+            [target_id, currency, 'active']
+        );
+        if (targetWallet.rows.length === 0) {
+            return res.status(404).json({ error: 'Target wallet not found' });
+        }
+        const amountInUsd = currency === 'USD' ? amount : convertAmount(amount, currency, 'USD');
+        const amountInCents = Math.round(amountInUsd * 100);
+        const paymentIntent = await stripeClient.paymentIntents.create({
+            amount: amountInCents,
+            currency: 'usd',
+            payment_method_types: ['card'],
+            metadata: { requester_id, target_id, original_currency: currency, original_amount: amount },
+        });
         await pool.query(
             'INSERT INTO payment_requests (id, requester_id, target_id, amount, currency, status) VALUES ($1, $2, $3, $4, $5, $6)',
-            [uuidv4(), requester_id, target_id, amount / 100, currency, 'pending']
+            [uuidv4(), requester_id, target_id, amount, currency, 'pending']
         );
-        res.json({ status: 'request_created' });
+        res.json({ message: 'Payment request created successfully', paymentIntentId: paymentIntent.id });
     } catch (error) {
         console.error('Request payment failed:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.post('/fund-wallet', async (req, res) => {
+    const token = req.headers.authorization?.split('Bearer ')[1];
+    if (!token) return res.status(401).json({ error: 'Missing token' });
+    const { amount, currency, payment_method, user_id } = req.body;
+    if (!amount || !currency || !payment_method || !user_id) {
+        return res.status(400).json({ error: 'Amount, currency, payment_method, and user_id are required' });
+    }
+    if (!['USD', 'NGN', 'EUR', 'CNY'].includes(currency)) {
+        return res.status(400).json({ error: 'Invalid currency. Must be USD, NGN, EUR, or CNY' });
+    }
+    if (amount < 1 || amount > 500) {
+        return res.status(400).json({ error: `Amount must be between 1 and 500 ${currency}` });
+    }
+    if (!['card', 'crypto'].includes(payment_method)) {
+        return res.status(400).json({ error: 'Invalid payment method' });
+    }
+    if (!stripeClient && payment_method === 'card') {
+        return res.status(503).json({ error: 'Stripe service is not available' });
+    }
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        if (decoded.user_id !== user_id) {
+            return res.status(403).json({ error: 'Unauthorized user' });
+        }
+        const wallet = await pool.query(
+            'SELECT id, balance FROM wallets WHERE user_id = $1 AND currency = $2 AND status = $3',
+            [user_id, currency, 'active']
+        );
+        if (wallet.rows.length === 0) {
+            return res.status(404).json({ error: 'Wallet not found' });
+        }
+        const amountInUsd = currency === 'USD' ? amount : convertAmount(amount, currency, 'USD');
+        const amountInCents = Math.round(amountInUsd * 100);
+        let paymentIntentId = null;
+        if (payment_method === 'card') {
+            const paymentIntent = await stripeClient.paymentIntents.create({
+                amount: amountInCents,
+                currency: 'usd',
+                payment_method_types: ['card'],
+                metadata: { user_id, original_currency: currency, original_amount: amount },
+            });
+            paymentIntentId = paymentIntent.id;
+        }
+        const client = await pool.connect();
+        try {
+            await client.query('BEGIN');
+            await client.query(
+                'UPDATE wallets SET balance = balance + $1 WHERE user_id = $2 AND currency = $3',
+                [amount, user_id, currency]
+            );
+            await client.query(
+                'INSERT INTO payments (payment_intent_id, amount, currency, sender_id, receiver_id, status, method, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+                [paymentIntentId || uuidv4(), amount, currency, user_id, user_id, 'succeeded', payment_method, new Date()]
+            );
+            await client.query('COMMIT');
+            res.json({ message: 'Wallet funded successfully', paymentIntentId });
+        } catch (error) {
+            await client.query('ROLLBACK');
+            console.error('Fund wallet failed:', error.message);
+            res.status(500).json({ error: error.message });
+        } finally {
+            client.release();
+        }
+    } catch (error) {
+        console.error('Fund wallet failed:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.post('/withdraw-wallet', async (req, res) => {
+    const token = req.headers.authorization?.split('Bearer ')[1];
+    if (!token) return res.status(401).json({ error: 'Missing token' });
+    const { amount, currency, payment_method, user_id } = req.body;
+    if (!amount || !currency || !payment_method || !user_id) {
+        return res.status(400).json({ error: 'Amount, currency, payment_method, and user_id are required' });
+    }
+    if (!['USD', 'NGN', 'EUR', 'CNY'].includes(currency)) {
+        return res.status(400).json({ error: 'Invalid currency. Must be USD, NGN, EUR, or CNY' });
+    }
+    if (amount < 1 || amount > 500) {
+        return res.status(400).json({ error: `Amount must be between 1 and 500 ${currency}` });
+    }
+    if (!['card', 'crypto'].includes(payment_method)) {
+        return res.status(400).json({ error: 'Invalid payment method' });
+    }
+    if (!stripeClient && payment_method === 'card') {
+        return res.status(503).json({ error: 'Stripe service is not available' });
+    }
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        if (decoded.user_id !== user_id) {
+            return res.status(403).json({ error: 'Unauthorized user' });
+        }
+        const wallet = await pool.query(
+            'SELECT id, balance FROM wallets WHERE user_id = $1 AND currency = $2 AND status = $3',
+            [user_id, currency, 'active']
+        );
+        if (wallet.rows.length === 0) {
+            return res.status(404).json({ error: 'Wallet not found' });
+        }
+        if (wallet.rows[0].balance < amount) {
+            return res.status(400).json({ error: 'Insufficient balance' });
+        }
+        const amountInUsd = currency === 'USD' ? amount : convertAmount(amount, currency, 'USD');
+        const amountInCents = Math.round(amountInUsd * 100);
+        let payoutId = null;
+        if (payment_method === 'card') {
+            const payout = await stripeClient.payouts.create({
+                amount: amountInCents,
+                currency: 'usd',
+                method: 'standard',
+                metadata: { user_id, original_currency: currency, original_amount: amount },
+            });
+            payoutId = payout.id;
+        }
+        const client = await pool.connect();
+        try {
+            await client.query('BEGIN');
+            await client.query(
+                'UPDATE wallets SET balance = balance - $1 WHERE user_id = $2 AND currency = $3',
+                [amount, user_id, currency]
+            );
+            await client.query(
+                'INSERT INTO payments (payment_intent_id, amount, currency, sender_id, receiver_id, status, method, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+                [payoutId || uuidv4(), amount, currency, user_id, user_id, 'succeeded', payment_method, new Date()]
+            );
+            await client.query('COMMIT');
+            res.json({ message: 'Withdrawal requested successfully', paymentIntentId: payoutId });
+        } catch (error) {
+            await client.query('ROLLBACK');
+            console.error('Withdraw wallet failed:', error.message);
+            res.status(500).json({ error: error.message });
+        } finally {
+            client.release();
+        }
+    } catch (error) {
+        console.error('Withdraw wallet failed:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/user/preferences', async (req, res) => {
+    const token = req.headers.authorization?.split('Bearer ')[1];
+    if (!token) return res.status(401).json({ error: 'Missing token' });
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const result = await pool.query('SELECT name, email FROM users WHERE id = $1', [decoded.user_id]);
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        res.json(result.rows[0]);
+    } catch (error) {
+        console.error('Fetch preferences failed:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.post('/user/preferences', async (req, res) => {
+    const token = req.headers.authorization?.split('Bearer ')[1];
+    if (!token) return res.status(401).json({ error: 'Missing token' });
+    const { name, email } = req.body;
+    if (!name || !email) {
+        return res.status(400).json({ error: 'Name and email are required' });
+    }
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        await pool.query('UPDATE users SET name = $1, email = $2 WHERE id = $3', [name, email, decoded.user_id]);
+        res.json({ message: 'Preferences updated successfully' });
+    } catch (error) {
+        console.error('Update preferences failed:', error.message);
         res.status(500).json({ error: error.message });
     }
 });
