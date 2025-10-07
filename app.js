@@ -9,9 +9,14 @@ const cors = require('cors');
 const app = express();
 app.use(bodyParser.json());
 app.use(cors({
-    origin: ['http://localhost:3000', 'https://chatpay-frontend.vercel.app'],
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
+    origin: [
+        'http://localhost:3000',
+        'https://chatpay-frontend.vercel.app',
+        'https://chatpay-frontend.onrender.com'
+    ],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true,
 }));
 
 const pool = new Pool({
