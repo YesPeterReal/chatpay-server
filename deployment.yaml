@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatpay-ledger
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: chatpay-ledger
+  template:
+    metadata:
+      labels:
+        app: chatpay-ledger
+    spec:
+      containers:
+      - name: chatpay-ledger
+        image: 370924439074.dkr.ecr.eu-west-3.amazonaws.com/chatpay-ledger:latest
+        ports:
+        - containerPort: 3000
+        env:
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: chatpay-secrets
+              key: postgres-password
+        - name: STRIPE_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: chatpay-secrets
+              key: stripe-secret-key
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: chatpay-secrets
+              key: jwt-secret
+        - name: SMTP_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: chatpay-secrets
+              key: smtp-username
+        - name: SMTP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: chatpay-secrets
+              key: smtp-password
+        volumeMounts:
+        - name: ssl-cert
+          mountPath: "/app/rds-ca-bundle.pem"
+          subPath: rds-ca-bundle.pem
+          readOnly: true
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 15
+          periodSeconds: 20
+          timeoutSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "512Mi"
+          limits:
+            cpu: "500m"
+            memory: "2Gi"
+      volumes:
+      - name: ssl-cert
+        configMap:
+          name: ssl-cert-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chatpay-service
+spec:
+  selector:
+    app: chatpay-ledger
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 3000
+  type: LoadBalancer
