@@ -1,4 +1,4 @@
-// Load .env only in development
+     // Force commit for Render deployment with updated env handling
      if (process.env.NODE_ENV !== 'production') {
        require('dotenv').config();
      }
