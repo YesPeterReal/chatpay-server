@@ -1,8 +1,11 @@
-require('dotenv').config();
+// Load .env only in development
+     if (process.env.NODE_ENV !== 'production') {
+       require('dotenv').config();
+     }
      const express = require('express');
      const { Pool } = require('pg');
      const jwt = require('jsonwebtoken');
-     const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+     const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY || '');
      const bodyParser = require('body-parser');
      const cors = require('cors');
      const { v4: uuidv4 } = require('uuid');
@@ -32,11 +35,14 @@ require('dotenv').config();
      app.use('/webhook', bodyParser.raw({ type: 'application/json' }));
 
      const pool = new Pool({
-       connectionString: process.env.DATABASE_URL,
-       ssl: { rejectUnauthorized: false },
-     });
+  connectionString: process.env.DATABASE_URL || 'postgresql://localhost:5432/chatpay_db',
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : { rejectUnauthorized: false },
+  connectionTimeoutMillis: 5000,
+  max: 10,
+  idleTimeoutMillis: 30000,
+});
 
-     pool.connect((err) => {
+    pool.connect((err) => {
        if (err) {
          console.error('Error connecting to database:', err);
          process.exit(1);
