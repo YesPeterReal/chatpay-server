@@ -1,40 +1,41 @@
-     // Force commit for Render deployment with updated env handling
-     if (process.env.NODE_ENV !== 'production') {
-       require('dotenv').config();
-     }
-     const express = require('express');
-     const { Pool } = require('pg');
-     const jwt = require('jsonwebtoken');
-     const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY || '');
-     const bodyParser = require('body-parser');
-     const cors = require('cors');
-     const { v4: uuidv4 } = require('uuid');
-     const bcrypt = require('bcrypt');
+// Force commit for Render deployment with updated env handling
+if (process.env.NODE_ENV !== 'production') {
+  require('dotenv').config();
+}
+const express = require('express');
+const { Pool } = require('pg');
+const jwt = require('jsonwebtoken');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY || '');
+const bodyParser = require('body-parser');
+const cors = require('cors');
+const { v4: uuidv4 } = require('uuid');
+const bcrypt = require('bcrypt');
+const WebSocket = require('ws');
 
-     const app = express();
+const app = express();
 
-     // Enable CORS for all routes except webhook
-     app.use((req, res, next) => {
-       if (req.originalUrl === '/webhook') {
-         next();
-       } else {
-         cors()(req, res, next);
-       }
-     });
+// Enable CORS for all routes except webhook
+app.use((req, res, next) => {
+  if (req.originalUrl === '/webhook') {
+    next();
+  } else {
+    cors()(req, res, next);
+  }
+});
 
-     // Use JSON parsing for all routes except /webhook
-     app.use((req, res, next) => {
-       if (req.originalUrl === '/webhook') {
-         next();
-       } else {
-         bodyParser.json()(req, res, next);
-       }
-     });
+// Use JSON parsing for all routes except /webhook
+app.use((req, res, next) => {
+  if (req.originalUrl === '/webhook') {
+    next();
+  } else {
+    bodyParser.json()(req, res, next);
+  }
+});
 
-     // Use raw body parsing for /webhook
-     app.use('/webhook', bodyParser.raw({ type: 'application/json' }));
+// Use raw body parsing for /webhook
+app.use('/webhook', bodyParser.raw({ type: 'application/json' }));
 
-     const pool = new Pool({
+const pool = new Pool({
   connectionString: process.env.DATABASE_URL || 'postgresql://localhost:5432/chatpay_db',
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : { rejectUnauthorized: false },
   connectionTimeoutMillis: 5000,
@@ -42,199 +43,205 @@
   idleTimeoutMillis: 30000,
 });
 
-    pool.connect((err) => {
-       if (err) {
-         console.error('Error connecting to database:', err);
-         process.exit(1);
-       }
-       console.log('Successfully connected to database!');
-       pool.query(`
-         CREATE TABLE IF NOT EXISTS users (
-           id uuid PRIMARY KEY,
-           email VARCHAR(255) UNIQUE NOT NULL,
-           password TEXT NOT NULL,
-           name VARCHAR(255) NOT NULL,
-           surname VARCHAR(255) NOT NULL,
-           gender VARCHAR(50),
-           phone VARCHAR(20),
-           dob DATE,
-           reset_token VARCHAR(255),
-           reset_token_expiry TIMESTAMP
-         );
-         CREATE TABLE IF NOT EXISTS wallets (
-           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-           user_id uuid NOT NULL,
-           balance NUMERIC(15,2) DEFAULT 0,
-           currency VARCHAR(3) NOT NULL,
-           status VARCHAR(20) NOT NULL DEFAULT 'active',
-           created_at TIMESTAMP DEFAULT NOW(),
-           FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-           CONSTRAINT wallets_user_id_currency_key UNIQUE (user_id, currency)
-         );
-         CREATE TABLE IF NOT EXISTS payments (
-           payment_intent_id VARCHAR(255) PRIMARY KEY,
-           amount NUMERIC(15,2) NOT NULL,
-           currency VARCHAR(3) NOT NULL,
-           sender_id uuid,
-           receiver_id uuid,
-           status VARCHAR(50) NOT NULL DEFAULT 'succeeded',
-           method VARCHAR(50) NOT NULL,
-           created_at TIMESTAMP DEFAULT NOW(),
-           FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE,
-           FOREIGN KEY (receiver_id) REFERENCES users(id) ON DELETE CASCADE
-         );
-         CREATE TABLE IF NOT EXISTS payment_requests (
-           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-           requester_id uuid,
-           target_id uuid,
-           amount NUMERIC(15,2) NOT NULL,
-           currency VARCHAR(3) NOT NULL,
-           status VARCHAR(50) NOT NULL DEFAULT 'pending',
-           created_at TIMESTAMP DEFAULT NOW(),
-           FOREIGN KEY (requester_id) REFERENCES users(id) ON DELETE CASCADE,
-           FOREIGN KEY (target_id) REFERENCES users(id) ON DELETE CASCADE
-         );
-       `, (err) => {
-         if (err) console.error('Error creating tables:', err);
-         else console.log('Tables ensured successfully!');
-       });
-     });
+pool.connect((err) => {
+  if (err) {
+    console.error('Error connecting to database:', err);
+    process.exit(1);
+  }
+  console.log('Successfully connected to database!');
+  pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id uuid PRIMARY KEY,
+      email VARCHAR(255) UNIQUE NOT NULL,
+      password TEXT NOT NULL,
+      name VARCHAR(255) NOT NULL,
+      surname VARCHAR(255) NOT NULL,
+      gender VARCHAR(50),
+      phone VARCHAR(20),
+      dob DATE,
+      reset_token VARCHAR(255),
+      reset_token_expiry TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS wallets (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id uuid NOT NULL,
+      balance NUMERIC(15,2) DEFAULT 0,
+      currency VARCHAR(3) NOT NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'active',
+      created_at TIMESTAMP DEFAULT NOW(),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      CONSTRAINT wallets_user_id_currency_key UNIQUE (user_id, currency)
+    );
+    CREATE TABLE IF NOT EXISTS payments (
+      payment_intent_id VARCHAR(255) PRIMARY KEY,
+      amount NUMERIC(15,2) NOT NULL,
+      currency VARCHAR(3) NOT NULL,
+      sender_id uuid,
+      receiver_id uuid,
+      status VARCHAR(50) NOT NULL DEFAULT 'succeeded',
+      method VARCHAR(50) NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW(),
+      FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (receiver_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS payment_requests (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      requester_id uuid,
+      target_id uuid,
+      amount NUMERIC(15,2) NOT NULL,
+      currency VARCHAR(3) NOT NULL,
+      status VARCHAR(50) NOT NULL DEFAULT 'pending',
+      created_at TIMESTAMP DEFAULT NOW(),
+      FOREIGN KEY (requester_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (target_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+  `, (err) => {
+    if (err) console.error('Error creating tables:', err);
+    else console.log('Tables ensured successfully!');
+  });
+});
 
-     const authenticateToken = (req, res, next) => {
-       const authHeader = req.headers['authorization'];
-       if (!authHeader || !authHeader.startsWith('Bearer ')) {
-         return res.status(401).json({ error: 'Missing or invalid Authorization header' });
-       }
-       const token = authHeader.split(' ')[1];
-       jwt.verify(token, process.env.JWT_SECRET, (err, claims) => {
-         if (err || !claims) {
-           return res.status(401).json({ error: 'Invalid token' });
-         }
-         req.claims = claims;
-         next();
-       });
-     };
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Missing or invalid Authorization header' });
+  }
+  const token = authHeader.split(' ')[1];
+  jwt.verify(token, process.env.JWT_SECRET, (err, claims) => {
+    if (err || !claims) {
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+    req.claims = claims;
+    next();
+  });
+};
 
-     app.options('*', (req, res, next) => {
-       if (req.originalUrl === '/webhook') {
-         res.header('Access-Control-Allow-Origin', '*');
-         res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
-         res.header('Access-Control-Allow-Headers', 'Content-Type, Stripe-Signature');
-         res.status(200).end();
-       } else {
-         cors()(req, res, next);
-       }
-     });
+app.options('*', (req, res, next) => {
+  if (req.originalUrl === '/webhook') {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Stripe-Signature');
+    res.status(200).end();
+  } else {
+    cors()(req, res, next);
+  }
+});
 
-     app.get('/health', (req, res) => {
-       res.json({ status: 'healthy' });
-     });
+app.get('/health', (req, res) => {
+  res.json({ status: 'healthy' });
+});
 
-     app.post('/login', async (req, res) => {
-       const { email, password } = req.body;
-       try {
-         const { rows } = await pool.query('SELECT id, password FROM users WHERE email = $1', [email]);
-         if (rows.length === 0) {
-           return res.status(401).json({ error: 'Invalid credentials' });
-         }
-         const validPassword = await bcrypt.compare(password, rows[0].password);
-         if (!validPassword) {
-           return res.status(401).json({ error: 'Invalid credentials' });
-         }
-         const token = jwt.sign({ user_id: rows[0].id }, process.env.JWT_SECRET, { expiresIn: '1h' });
-         res.json({ token });
-       } catch (err) {
-         res.status(500).json({ error: 'Error generating token' });
-       }
-     });
+app.post('/login', async (req, res) => {
+  const { email, password } = req.body;
+  try {
+    const { rows } = await pool.query('SELECT id, password FROM users WHERE email = $1', [email]);
+    if (rows.length === 0) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    const validPassword = await bcrypt.compare(password, rows[0].password);
+    if (!validPassword) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    const token = jwt.sign({ user_id: rows[0].id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    res.json({ token });
+  } catch (err) {
+    res.status(500).json({ error: 'Error generating token' });
+  }
+});
 
-     app.post('/user-by-email', authenticateToken, async (req, res) => {
-       const { email } = req.body;
-       try {
-         const { rows } = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
-         if (rows.length === 0) {
-           return res.status(404).json({ error: 'User not found' });
-         }
-         res.json({ user_id: rows[0].id });
-       } catch (err) {
-         res.status(500).json({ error: 'Error querying user' });
-       }
-     });
+app.post('/user-by-email', authenticateToken, async (req, res) => {
+  const { email } = req.body;
+  try {
+    const { rows } = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    res.json({ user_id: rows[0].id });
+  } catch (err) {
+    res.status(500).json({ error: 'Error querying user' });
+  }
+});
 
-     app.get('/wallet/balance', authenticateToken, async (req, res) => {
-       try {
-         const { rows } = await pool.query('SELECT balance, currency FROM wallets WHERE user_id = $1 AND status = $2', [req.claims.user_id, 'active']);
-         res.json(rows.map(row => ({ balance: row.balance, currency: row.currency })));
-       } catch (err) {
-         res.status(500).json({ error: 'Error querying wallets' });
-       }
-     });
+app.get('/wallet/balance', authenticateToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT balance, currency FROM wallets WHERE user_id = $1 AND status = $2', [req.claims.user_id, 'active']);
+    res.json(rows.map(row => ({ balance: row.balance, currency: row.currency })));
+  } catch (err) {
+    res.status(500).json({ error: 'Error querying wallets' });
+  }
+});
 
-     app.get('/payments/received', authenticateToken, async (req, res) => {
-       try {
-         const { rows } = await pool.query(
-           'SELECT payment_intent_id, amount, currency, status, created_at FROM payments WHERE receiver_id = $1 AND status = $2',
-           [req.claims.user_id, 'succeeded']
-         );
-         res.json(rows.map(row => ({
-           paymentIntentId: row.payment_intent_id,
-           amount: row.amount,
-           currency: row.currency,
-           status: row.status,
-           createdAt: row.created_at.toISOString(),
-         })));
-       } catch (err) {
-         res.status(500).json({ error: 'Error querying payments' });
-       }
-     });
+app.get('/payments/received', authenticateToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT payment_intent_id, amount, currency, status, created_at FROM payments WHERE receiver_id = $1 AND status = $2',
+      [req.claims.user_id, 'succeeded']
+    );
+    res.json(rows.map(row => ({
+      paymentIntentId: row.payment_intent_id,
+      amount: row.amount,
+      currency: row.currency,
+      status: row.status,
+      createdAt: row.created_at.toISOString(),
+    })));
+  } catch (err) {
+    res.status(500).json({ error: 'Error querying payments' });
+  }
+});
 
-     app.post('/create-payment', authenticateToken, async (req, res) => {
-       const { amount, currency, user_id, target_id } = req.body;
-       if (user_id !== req.claims.user_id) {
-         return res.status(401).json({ error: 'Unauthorized' });
-       }
-       try {
-         const pi = await stripe.paymentIntents.create({
-           amount: Math.round(amount * 100),
-           currency,
-           payment_method_types: ['card'],
-         });
-         const { rows } = await pool.query('SELECT EXISTS(SELECT 1 FROM payments WHERE payment_intent_id = $1)', [pi.id]);
-         if (!rows[0].exists) {
-           await pool.query(
-             'INSERT INTO payments (payment_intent_id, amount, currency, sender_id, receiver_id, status, method) VALUES ($1, $2, $3, $4, $5, $6, $7)',
-             [pi.id, amount, currency, user_id, target_id, pi.status, 'card']
-           );
-         }
-         res.json({
-           paymentIntentId: pi.id,
-           amount,
-           currency,
-           status: pi.status,
-           createdAt: new Date().toISOString(),
-         });
-       } catch (err) {
-         res.status(500).json({ error: `Error creating payment: ${err.message}` });
-       }
-     });
+app.post('/create-payment', authenticateToken, async (req, res) => {
+  const { amount, currency, user_id, target_id } = req.body;
+  if (user_id !== req.claims.user_id) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  try {
+    const pi = await stripe.paymentIntents.create({
+      amount: Math.round(amount * 100),
+      currency,
+      payment_method_types: ['card'],
+    });
+    const { rows } = await pool.query('SELECT EXISTS(SELECT 1 FROM payments WHERE payment_intent_id = $1)', [pi.id]);
+    if (!rows[0].exists) {
+      await pool.query(
+        'INSERT INTO payments (payment_intent_id, amount, currency, sender_id, receiver_id, status, method) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+        [pi.id, amount, currency, user_id, target_id, pi.status, 'card']
+      );
+    }
+    res.json({
+      paymentIntentId: pi.id,
+      amount,
+      currency,
+      status: pi.status,
+      createdAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.status(500).json({ error: `Error creating payment: ${err.message}` });
+  }
+});
 
-     app.post('/request-payment', authenticateToken, async (req, res) => {
-       const { amount, currency, user_id, target_id } = req.body;
-       if (user_id !== req.claims.user_id) {
-         return res.status(401).json({ error: 'Unauthorized' });
-       }
-       try {
-         await pool.query(
-           'INSERT INTO payment_requests (id, requester_id, target_id, amount, currency, status) VALUES ($1, $2, $3, $4, $5, $6)',
-           [uuidv4(), user_id, target_id, amount, currency, 'pending']
-         );
-         res.json({ status: 'request_created' });
-       } catch (err) {
-         res.status(500).json({ error: `Error inserting payment request: ${err.message}` });
-       }
-     });
+app.post('/request-payment', authenticateToken, async (req, res) => {
+  const { amount, currency, user_id, target_id } = req.body;
+  if (user_id !== req.claims.user_id) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  try {
+    await pool.query(
+      'INSERT INTO payment_requests (id, requester_id, target_id, amount, currency, status) VALUES ($1, $2, $3, $4, $5, $6)',
+      [uuidv4(), user_id, target_id, amount, currency, 'pending']
+    );
+    res.json({ status: 'request_created' });
+  } catch (err) {
+    res.status(500).json({ error: `Error inserting payment request: ${err.message}` });
+  }
+});
 
-  app.post('/webhook', async (req, res) => {
+const wss = new WebSocket.Server({ port: process.env.WS_PORT || 8081 });
+wss.on('connection', (ws) => {
+  console.log('WebSocket client connected');
+  ws.on('close', () => console.log('WebSocket client disconnected'));
+});
+
+app.post('/webhook', async (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
   try {
@@ -252,20 +259,16 @@
       if (rows[0].exists) {
         await pool.query('UPDATE payments SET status = $1 WHERE payment_intent_id = $2', [status, pi.id]);
       } else {
-        // Insert test payment with test user IDs
         await pool.query(
           'INSERT INTO payments (payment_intent_id, amount, currency, sender_id, receiver_id, status, method, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
           [pi.id, pi.amount / 100, pi.currency, '550e8400-e29b-41d4-a716-446655440000', '550e8400-e29b-41d4-a716-446655440000', status, 'card', new Date()]
         );
       }
-      const clientWebhookUrl = process.env.CLIENT_WEBHOOK_URL;
-      if (clientWebhookUrl) {
-        await fetch(clientWebhookUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ event: event.type, paymentIntentId: pi.id, status }),
-        });
-      }
+      wss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(JSON.stringify({ event: event.type, paymentIntentId: pi.id, status }));
+        }
+      });
     } catch (err) {
       console.log('Error updating payment:', err.message);
       return res.status(500).json({ error: `Error updating payment status: ${err.message}` });
@@ -274,5 +277,23 @@
   res.json({ status: 'received' });
 });
 
-     const port = process.env.PORT || 3000;
-     app.listen(port, () => console.log(`Server running on port ${port}`));
+app.get('/list-payments', authenticateToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT payment_intent_id, amount, currency, status, created_at FROM payments WHERE sender_id = $1 OR receiver_id = $1',
+      [req.claims.user_id]
+    );
+    res.json(rows.map(row => ({
+      paymentIntentId: row.payment_intent_id,
+      amount: row.amount,
+      currency: row.currency,
+      status: row.status,
+      createdAt: row.created_at.toISOString(),
+    })));
+  } catch (err) {
+    res.status(500).json({ error: `Error querying payments: ${err.message}` });
+  }
+});
+
+const port = process.env.PORT || 3000;
+app.listen(port, () => console.log(`Server running on port ${port}`));
