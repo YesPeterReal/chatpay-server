@@ -290,22 +290,6 @@ app.post('/create-payment', authenticateToken, async (req, res) => {
   }
 });
 
-app.post('/request-payment', authenticateToken, async (req, res) => {
-  const { amount, currency, user_id, target_id } = req.body;
-  if (user_id !== req.claims.user_id) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-  try {
-    await pool.query(
-      'INSERT INTO payment_requests (id, requester_id, target_id, amount, currency, status) VALUES ($1, $2, $3, $4, $5, $6)',
-      [uuidv4(), user_id, target_id, amount, currency, 'pending']
-    );
-    res.json({ status: 'request_created' });
-  } catch (err) {
-    res.status(500).json({ error: `Error inserting payment request: ${err.message}` });
-  }
-});
-
 app.post('/webhook', async (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
