@@ -335,5 +335,144 @@ app.get('/list-payments', authenticateToken, async (req, res) => {
   }
 });
 
+// 🔥 RESTORE MISSING ENDPOINTS FOR BUBBLES
+app.get('/recent-transactions', authenticateToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT payment_intent_id, amount, currency, status, created_at FROM payments WHERE sender_id = $1 OR receiver_id = $1 ORDER BY created_at DESC LIMIT 10',
+      [req.claims.user_id]
+    );
+    res.json(rows.map(row => ({
+      paymentIntentId: row.payment_intent_id,
+      amount: row.amount,
+      currency: row.currency,
+      status: row.status,
+      createdAt: row.created_at.toISOString(),
+    })));
+  } catch (err) {
+    res.status(500).json({ error: 'Error fetching transactions' });
+  }
+});
+
+app.post('/withdraw-wallet', authenticateToken, async (req, res) => {
+  const { amount, currency } = req.body;
+  try {
+    const { rows: walletRows } = await pool.query(
+      'SELECT balance FROM wallets WHERE user_id = $1 AND currency = $2 AND status = $3',
+      [req.claims.user_id, currency, 'active']
+    );
+    if (walletRows.length === 0 || walletRows[0].balance < amount) {
+      return res.status(400).json({ error: 'Insufficient balance' });
+    }
+    await pool.query(
+      'UPDATE wallets SET balance = balance - $1 WHERE user_id = $2 AND currency = $3 AND status = $4',
+      [amount, req.claims.user_id, currency, 'active']
+    );
+    // Create wallet debit record
+    await pool.query(
+      'INSERT INTO payments (payment_intent_id, amount, currency, sender_id, status, method, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+      [uuidv4(), amount, currency, req.claims.user_id, 'succeeded', 'withdraw', new Date()]
+    );
+    wss.clients.forEach(client => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(JSON.stringify({ 
+          event: 'wallet_debited', 
+          amount, 
+          currency, 
+          message: `Wallet debited: -${amount} ${currency}` 
+        }));
+      }
+    });
+    res.json({ success: true, message: `Withdrew ${amount} ${currency}` });
+  } catch (err) {
+    res.status(500).json({ error: 'Withdraw failed' });
+  }
+});
+
+// 🔥 FIX create-payment AUTH (add missing wallet creation)
+app.post('/create-payment', authenticateToken, async (req, res) => {
+  const { amount, currency, user_id, target_id } = req.body;
+  if (user_id !== req.claims.user_id) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  try {
+    // Ensure sender has wallet
+    const { rows: senderWallet } = await pool.query(
+      'SELECT id FROM wallets WHERE user_id = $1 AND currency = $2',
+      [user_id, currency]
+    );
+    if (senderWallet.length === 0) {
+      await pool.query(
+        'INSERT INTO wallets (id, user_id, balance, currency, status) VALUES (gen_random_uuid(), $1, 0, $2, $3)',
+        [user_id, currency, 'active']
+      );
+    }
+    const pi = await stripe.paymentIntents.create({
+      amount: Math.round(amount * 100),
+      currency,
+      payment_method_types: ['card'],
+    });
+    const { rows } = await pool.query('SELECT EXISTS(SELECT 1 FROM payments WHERE payment_intent_id = $1)', [pi.id]);
+    if (!rows[0].exists) {
+      await pool.query(
+        'INSERT INTO payments (payment_intent_id, amount, currency, sender_id, receiver_id, status, method) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+        [pi.id, amount, currency, user_id, target_id, pi.status, 'card']
+      );
+    }
+    // Notify via WebSocket
+    wss.clients.forEach(client => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(JSON.stringify({ 
+          event: 'payment_sent', 
+          paymentIntentId: pi.id, 
+          amount, 
+          currency,
+          message: `Payment sent: ${amount} ${currency}`
+        }));
+      }
+    });
+    res.json({
+      paymentIntentId: pi.id,
+      amount,
+      currency,
+      status: pi.status,
+      createdAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.status(500).json({ error: `Error creating payment: ${err.message}` });
+  }
+});
+
+// 🔥 ADD auto-wallet creation on user login
+app.post('/signin', async (req, res) => {
+  const { email, password } = req.body;
+  try {
+    const { rows } = await pool.query('SELECT id, password FROM users WHERE email = $1', [email]);
+    if (rows.length === 0) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    const validPassword = await bcrypt.compare(password, rows[0].password);
+    if (!validPassword) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    const token = jwt.sign({ user_id: rows[0].id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    
+    // CREATE WALLET AUTOMATICALLY (was missing!)
+    const { rows: walletRows } = await pool.query(
+      'SELECT id FROM wallets WHERE user_id = $1 AND currency = $2',
+      [rows[0].id, 'EUR']
+    );
+    if (walletRows.length === 0) {
+      await pool.query(
+        'INSERT INTO wallets (id, user_id, balance, currency, status) VALUES (gen_random_uuid(), $1, 0, $2, $3)',
+        [rows[0].id, 'EUR', 'active']
+      );
+    }
+    
+    res.json({ token });
+  } catch (err) {
+    res.status(500).json({ error: 'Error generating token' });
+  }
+});
 const port = process.env.PORT || 3000;
 server.listen(port, () => console.log(`Server running on port ${port}`));
