@@ -94,16 +94,16 @@ pool.connect((err) => {
       FOREIGN KEY (receiver_id) REFERENCES users(id) ON DELETE CASCADE
     );
     CREATE TABLE IF NOT EXISTS payment_requests (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      requester_id uuid,
-      target_id uuid,
-      amount NUMERIC(15,2) NOT NULL,
-      currency VARCHAR(3) NOT NULL,
-      status VARCHAR(50) NOT NULL DEFAULT 'pending',
-      created_at TIMESTAMP DEFAULT NOW(),
-      FOREIGN KEY (requester_id) REFERENCES users(id) ON DELETE CASCADE,
-      FOREIGN KEY (target_id) REFERENCES users(id) ON DELETE CASCADE
-    );
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  requester_id uuid,
+  target_id uuid,
+  amount NUMERIC(15,2) NOT NULL,
+  currency VARCHAR(3) NOT NULL,
+  status VARCHAR(50) NOT NULL DEFAULT 'pending',
+  created_at TIMESTAMP DEFAULT NOW(),
+  FOREIGN KEY (requester_id) REFERENCES users(id) ON DELETE CASCADE
+
+  );
   `, (err) => {
     if (err) console.error('Error creating tables:', err);
     else console.log('Tables ensured successfully!');
