@@ -437,9 +437,9 @@ app.post('/request-payment', authenticateToken, async (req, res) => {
   
   try {
     await pool.query(
-      'INSERT INTO payment_requests (id, requester_id, target_id, amount, currency, status) VALUES ($1, $2, $3, $4, $5, $6)',
-      [uuidv4(), user_id, target_id, amount, currency, 'pending']
-    );
+  'INSERT INTO payment_requests (id, requester_id, target_id, amount, currency, status) VALUES ($1, $2, $3, $4, $5, $6)',
+  [uuidv4(), user_id, uuidv4(), amount, currency, 'pending']  // ← FIXED!
+);
     wss.clients.forEach(client => {
       if (client.readyState === WebSocket.OPEN) {
         client.send(JSON.stringify({ event: 'payment_requested', amount, currency, message: `Payment requested: ${amount} ${currency}` }));
