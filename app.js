@@ -22,6 +22,7 @@ wss.on('connection', (ws) => {
   ws.on('close', () => console.log('WebSocket client disconnected'));
 });
 
+console.log('🪄 BUBBLES LIVE!');  // FORCE DEPLOY
 // Enable CORS for all routes except webhook
 app.use((req, res, next) => {
   if (req.originalUrl === '/webhook') {
