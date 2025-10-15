@@ -445,7 +445,28 @@ app.post('/signin', async (req, res) => {
   }
 });
 
-  // 🔥 ADD 1: /fund-wallet (fixes 404)
+ // 🔥 FIX 1: Request Payment (401 → 200)
+app.post('/request-payment', authenticateToken, async (req, res) => {
+  const { amount, currency, target_id } = req.body;
+  const user_id = req.claims.user_id;  // 🔥 USE TOKEN ID
+  
+  try {
+    await pool.query(
+      'INSERT INTO payment_requests (id, requester_id, target_id, amount, currency, status) VALUES ($1, $2, $3, $4, $5, $6)',
+      [uuidv4(), user_id, target_id, amount, currency, 'pending']
+    );
+    wss.clients.forEach(client => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(JSON.stringify({ event: 'payment_requested', amount, currency, message: `Payment requested: ${amount} ${currency}` }));
+      }
+    });
+    res.json({ status: 'request_created' });
+  } catch (err) {
+    res.status(500).json({ error: `Error: ${err.message}` });
+  }
+});
+
+// 🔥 FIX 2: Fund Wallet (No Response → 200)
 app.post('/fund-wallet', authenticateToken, async (req, res) => {
   const { amount, currency } = req.body;
   try {
@@ -478,24 +499,21 @@ app.post('/fund-wallet', authenticateToken, async (req, res) => {
   }
 });
 
-// 🔥 ADD 2: /request-payment FIX (fixes 401)
-app.post('/request-payment', authenticateToken, async (req, res) => {
-  const { amount, currency, target_id } = req.body;
-  const user_id = req.claims.user_id;  // 🔥 FIX: Use token user_id
-  
+// 🔥 FIX 3: User Preferences (404 → 200)
+app.get('/user/preferences', authenticateToken, async (req, res) => {
   try {
-    await pool.query(
-      'INSERT INTO payment_requests (id, requester_id, target_id, amount, currency, status) VALUES ($1, $2, $3, $4, $5, $6)',
-      [uuidv4(), user_id, target_id, amount, currency, 'pending']
-    );
-    wss.clients.forEach(client => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify({ event: 'payment_requested', amount, currency, message: `Payment requested: ${amount} ${currency}` }));
-      }
+    const { rows } = await pool.query('SELECT * FROM users WHERE id = $1', [req.claims.user_id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    res.json({
+      notificationsEnabled: true,
+      theme: 'day',
+      currency: 'EUR',
+      language: 'en'
     });
-    res.json({ status: 'request_created' });
   } catch (err) {
-    res.status(500).json({ error: `Error inserting payment request: ${err.message}` });
+    res.status(500).json({ error: 'Error fetching preferences' });
   }
 });
 const port = process.env.PORT || 3000;
