@@ -445,5 +445,58 @@ app.post('/signin', async (req, res) => {
   }
 });
 
+  // 🔥 ADD 1: /fund-wallet (fixes 404)
+app.post('/fund-wallet', authenticateToken, async (req, res) => {
+  const { amount, currency } = req.body;
+  try {
+    const { rows: walletRows } = await pool.query(
+      'SELECT id FROM wallets WHERE user_id = $1 AND currency = $2',
+      [req.claims.user_id, currency]
+    );
+    if (walletRows.length === 0) {
+      await pool.query(
+        'INSERT INTO wallets (id, user_id, balance, currency, status) VALUES (gen_random_uuid(), $1, 0, $2, $3)',
+        [req.claims.user_id, currency, 'active']
+      );
+    }
+    await pool.query(
+      'UPDATE wallets SET balance = balance + $1 WHERE user_id = $2 AND currency = $3 AND status = $4',
+      [amount, req.claims.user_id, currency, 'active']
+    );
+    await pool.query(
+      'INSERT INTO payments (payment_intent_id, amount, currency, sender_id, status, method, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+      [uuidv4(), amount, currency, req.claims.user_id, 'succeeded', 'fund', new Date()]
+    );
+    wss.clients.forEach(client => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(JSON.stringify({ event: 'wallet_funded', amount, currency, message: `Wallet funded: +${amount} ${currency}` }));
+      }
+    });
+    res.json({ success: true, message: `Funded ${amount} ${currency}` });
+  } catch (err) {
+    res.status(500).json({ error: 'Funding failed' });
+  }
+});
+
+// 🔥 ADD 2: /request-payment FIX (fixes 401)
+app.post('/request-payment', authenticateToken, async (req, res) => {
+  const { amount, currency, target_id } = req.body;
+  const user_id = req.claims.user_id;  // 🔥 FIX: Use token user_id
+  
+  try {
+    await pool.query(
+      'INSERT INTO payment_requests (id, requester_id, target_id, amount, currency, status) VALUES ($1, $2, $3, $4, $5, $6)',
+      [uuidv4(), user_id, target_id, amount, currency, 'pending']
+    );
+    wss.clients.forEach(client => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(JSON.stringify({ event: 'payment_requested', amount, currency, message: `Payment requested: ${amount} ${currency}` }));
+      }
+    });
+    res.json({ status: 'request_created' });
+  } catch (err) {
+    res.status(500).json({ error: `Error inserting payment request: ${err.message}` });
+  }
+});
 const port = process.env.PORT || 3000;
 server.listen(port, () => console.log(`Server running on port ${port}`));
