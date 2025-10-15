@@ -430,19 +430,32 @@ app.post('/signin', async (req, res) => {
   }
 });
 
- // 🔥 FIX 1: Request Payment (401 → 200)
+ // 🔥 SECURE FIX: Request Payment (Email → Real UUID)
 app.post('/request-payment', authenticateToken, async (req, res) => {
-  const { amount, currency, target_id } = req.body;
-  const user_id = req.claims.user_id;  // 🔥 USE TOKEN ID
+  const { amount, currency, target_email } = req.body;  // ← EMAIL not ID!
+  const user_id = req.claims.user_id;
   
   try {
+    // 🔐 SECURE: Lookup REAL user by email
+    const { rows: targetUser } = await pool.query('SELECT id FROM users WHERE email = $1', [target_email]);
+    if (targetUser.length === 0) {
+      return res.status(404).json({ error: 'Target user not found' });
+    }
+    const target_id = targetUser[0].id;  // ← REAL UUID!
+    
     await pool.query(
-  'INSERT INTO payment_requests (id, requester_id, target_id, amount, currency, status) VALUES ($1, $2, $3, $4, $5, $6)',
-  [uuidv4(), user_id, uuidv4(), amount, currency, 'pending']  // ← FIXED!
-);
+      'INSERT INTO payment_requests (id, requester_id, target_id, amount, currency, status) VALUES ($1, $2, $3, $4, $5, $6)',
+      [uuidv4(), user_id, target_id, amount, currency, 'pending']
+    );
+    
     wss.clients.forEach(client => {
       if (client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify({ event: 'payment_requested', amount, currency, message: `Payment requested: ${amount} ${currency}` }));
+        client.send(JSON.stringify({ 
+          event: 'payment_requested', 
+          amount, 
+          currency, 
+          message: `Payment requested: ${amount} ${currency} to ${target_email}` 
+        }));
       }
     });
     res.json({ status: 'request_created' });
