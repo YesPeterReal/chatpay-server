@@ -10,9 +10,17 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
 const bcrypt = require('bcrypt');
+const http = require('http');
 const WebSocket = require('ws');
 
 const app = express();
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server, path: '/ws' });
+
+wss.on('connection', (ws) => {
+  console.log('WebSocket client connected');
+  ws.on('close', () => console.log('WebSocket client disconnected'));
+});
 
 // Enable CORS for all routes except webhook
 app.use((req, res, next) => {
@@ -131,7 +139,45 @@ app.get('/health', (req, res) => {
   res.json({ status: 'healthy' });
 });
 
+app.post('/signup', async (req, res) => {
+  const { email, password, name, surname } = req.body;
+  try {
+    const { rows } = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
+    if (rows.length > 0) {
+      return res.status(400).json({ error: 'Email already exists' });
+    }
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const userId = uuidv4();
+    await pool.query(
+      'INSERT INTO users (id, email, password, name, surname) VALUES ($1, $2, $3, $4, $5)',
+      [userId, email, hashedPassword, name, surname]
+    );
+    const token = jwt.sign({ user_id: userId }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    res.json({ token });
+  } catch (err) {
+    res.status(500).json({ error: `Error creating user: ${err.message}` });
+  }
+});
+
 app.post('/login', async (req, res) => {
+  const { email, password } = req.body;
+  try {
+    const { rows } = await pool.query('SELECT id, password FROM users WHERE email = $1', [email]);
+    if (rows.length === 0) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    const validPassword = await bcrypt.compare(password, rows[0].password);
+    if (!validPassword) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    const token = jwt.sign({ user_id: rows[0].id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    res.json({ token });
+  } catch (err) {
+    res.status(500).json({ error: 'Error generating token' });
+  }
+});
+
+app.post('/signin', async (req, res) => {
   const { email, password } = req.body;
   try {
     const { rows } = await pool.query('SELECT id, password FROM users WHERE email = $1', [email]);
@@ -235,12 +281,6 @@ app.post('/request-payment', authenticateToken, async (req, res) => {
   }
 });
 
-const wss = new WebSocket.Server({ port: process.env.WS_PORT || 8081 });
-wss.on('connection', (ws) => {
-  console.log('WebSocket client connected');
-  ws.on('close', () => console.log('WebSocket client disconnected'));
-});
-
 app.post('/webhook', async (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
@@ -296,4 +336,4 @@ app.get('/list-payments', authenticateToken, async (req, res) => {
 });
 
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Server running on port ${port}`));
+server.listen(port, () => console.log(`Server running on port ${port}`));
