@@ -20,14 +20,15 @@ wss.on('connection', (ws) => {
   ws.on('close', () => console.log('WebSocket client disconnected'));
 });
 console.log('🪄 BUBBLES LIVE!'); // FORCE DEPLOY
-// Enable CORS for all routes except webhook
-app.use((req, res, next) => {
-  if (req.originalUrl === '/webhook') {
-    next();
-  } else {
-    cors()(req, res, next);
-  }
-});
+
+// 🔓 FIXED: CORS FIRST - UNLOCKS ALL DOORS INCLUDING /SIGNIN!
+app.use(cors({
+  origin: process.env.NODE_ENV === 'production' ? 'https://chatpay-frontend.onrender.com' : 'http://localhost:3000',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+}));
+
 // Use JSON parsing for all routes except /webhook
 app.use((req, res, next) => {
   if (req.originalUrl === '/webhook') {
@@ -83,19 +84,20 @@ pool.connect((err) => {
       status VARCHAR(50) NOT NULL DEFAULT 'succeeded',
       method VARCHAR(50) NOT NULL,
       created_at TIMESTAMP DEFAULT NOW(),
+      target_email VARCHAR(255),
       FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY (receiver_id) REFERENCES users(id) ON DELETE CASCADE
     );
     CREATE TABLE IF NOT EXISTS payment_requests (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  requester_id uuid,
-  target_id uuid,
-  amount NUMERIC(15,2) NOT NULL,
-  currency VARCHAR(3) NOT NULL,
-  status VARCHAR(50) NOT NULL DEFAULT 'pending',
-  created_at TIMESTAMP DEFAULT NOW(),
-  FOREIGN KEY (requester_id) REFERENCES users(id) ON DELETE CASCADE
-  );
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      requester_id uuid,
+      target_id uuid,
+      amount NUMERIC(15,2) NOT NULL,
+      currency VARCHAR(3) NOT NULL,
+      status VARCHAR(50) NOT NULL DEFAULT 'pending',
+      created_at TIMESTAMP DEFAULT NOW(),
+      FOREIGN KEY (requester_id) REFERENCES users(id) ON DELETE CASCADE
+    );
   `, (err) => {
     if (err) console.error('Error creating tables:', err);
     else console.log('Tables ensured successfully!');
@@ -115,15 +117,12 @@ const authenticateToken = (req, res, next) => {
     next();
   });
 };
-app.options('*', (req, res, next) => {
-  if (req.originalUrl === '/webhook') {
-    res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Stripe-Signature');
-    res.status(200).end();
-  } else {
-    cors()(req, res, next);
-  }
+// 🔓 FIXED: OPTIONS HANDLER - NOW WORKS WITH GLOBAL CORS
+app.options('*', (req, res) => {
+  res.header('Access-Control-Allow-Origin', process.env.NODE_ENV === 'production' ? 'https://chatpay-frontend.onrender.com' : 'http://localhost:3000');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.status(200).end();
 });
 app.get('/health', (req, res) => {
   res.json({ status: 'healthy' });
@@ -398,7 +397,7 @@ app.post('/signin', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
- // 🔥 SECURE FIX: Request Payment (Email → Real UUID)
+// 🔥 SECURE FIX: Request Payment (Email → Real UUID)
 app.post('/request-payment', authenticateToken, async (req, res) => {
   const { amount, currency, target_email } = req.body; // ← EMAIL not ID!
   const user_id = req.claims.user_id;
@@ -463,7 +462,6 @@ app.post('/fund-wallet', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Funding failed' });
   }
 });
-
 // 🔥 FIX 3: User Preferences (404 → 200)
 app.get('/user/preferences', authenticateToken, async (req, res) => {
   try {
@@ -481,13 +479,12 @@ app.get('/user/preferences', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Error fetching preferences' });
   }
 });
-
 // ₿ CRYPTO TRANSFER - MOST SECURE! (ADDED EXACTLY!)
 app.post('/crypto-transfer', authenticateToken, async (req, res) => {
   try {
     const { to_address, amount, currency } = req.body;
     const user_id = req.claims.user_id;
-    
+   
     // 1. JWT CHECKED ✅ (from authenticateToken)
     // 2. Get user's wallet
     const { rows: walletRows } = await pool.query(
@@ -497,22 +494,22 @@ app.post('/crypto-transfer', authenticateToken, async (req, res) => {
     if (walletRows.length === 0 || walletRows[0].balance < amount) {
       return res.status(400).json({ error: 'Insufficient balance' });
     }
-    
+   
     // 3. SIMULATE BLOCKCHAIN (Real bitcoinjs-lib in production)
     const txHash = `tx_${uuidv4().slice(0, 8)}`; // Real: bitcoinjs-lib tx
-    
+   
     // 4. Update wallet
     await pool.query(
       'UPDATE wallets SET balance = balance - $1 WHERE user_id = $2 AND currency = $3 AND status = $4',
       [amount, user_id, currency, 'active']
     );
-    
+   
     // 5. Record crypto transaction
     await pool.query(
       'INSERT INTO payments (payment_intent_id, amount, currency, sender_id, status, method, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)',
       [txHash, amount, currency, user_id, 'succeeded', 'crypto', new Date()]
     );
-    
+   
     // 6. WebSocket notification
     wss.clients.forEach(client => {
       if (client.readyState === WebSocket.OPEN) {
@@ -526,7 +523,7 @@ app.post('/crypto-transfer', authenticateToken, async (req, res) => {
         }));
       }
     });
-    
+   
     res.json({ 
       message: `₿ ${amount} ${currency} sent! Tx: ${txHash}`,
       txHash 
@@ -535,20 +532,19 @@ app.post('/crypto-transfer', authenticateToken, async (req, res) => {
     res.status(400).json({ error: error.message });
   }
 });
-
 // 3. WALLET-TO-WALLET (YOUR CURRENT - UPGRADED WITH 2FA!)
 app.post('/transfer', authenticateToken, async (req, res) => {
   try {
     const { to_wallet, amount } = req.body;
     const from_wallet = req.claims.user_id;
-    
+   
     // 1. JWT CHECK ✅
     // 2. 2FA CHECK (SMS) - SIMPLIFIED FOR NOW
     // const otp = await sendOTP(req.user.phone);
     // if (req.body.otp !== otp) {
     //   return res.status(401).json({ error: 'Invalid 2FA' });
     // }
-    
+   
     // 3. WALLET TRANSFER
     const { rows: fromWallet } = await pool.query(
       'SELECT balance FROM wallets WHERE user_id = $1 AND currency = $2',
@@ -558,11 +554,11 @@ app.post('/transfer', authenticateToken, async (req, res) => {
       'SELECT balance FROM wallets WHERE user_id = $1 AND currency = $2',
       [to_wallet, 'EUR']
     );
-    
+   
     if (fromWallet.length === 0 || fromWallet[0].balance < amount) {
       return res.status(400).json({ error: 'Insufficient balance' });
     }
-    
+   
     await pool.query(
       'UPDATE wallets SET balance = balance - $1 WHERE user_id = $2 AND currency = $3',
       [amount, from_wallet, 'EUR']
@@ -571,7 +567,7 @@ app.post('/transfer', authenticateToken, async (req, res) => {
       'UPDATE wallets SET balance = balance + $1 WHERE user_id = $2 AND currency = $3',
       [amount, to_wallet, 'EUR']
     );
-    
+   
     res.json({ message: `✅ ${amount} transferred to ${to_wallet}` });
   } catch (error) {
     res.status(400).json({ error: error.message });
