@@ -188,10 +188,9 @@ app.get('/payments/received', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Error querying payments' });
   }
 });
-// 🔥 FIXED create-payment (ONLY 2 LINES CHANGED!)
+// 🔥 FIXED create-payment (target_email instead of target_id!)
 app.post('/create-payment', authenticateToken, async (req, res) => {
-  const { amount, currency, target_id } = req.body;
-  // 🔥 FIX 1: Use token user_id (ignore body user_id)
+  const { amount, currency, target_email } = req.body; // ✅ FIXED: target_email!
   const user_id = req.claims.user_id;
  
   try {
@@ -214,8 +213,8 @@ app.post('/create-payment', authenticateToken, async (req, res) => {
     const { rows } = await pool.query('SELECT EXISTS(SELECT 1 FROM payments WHERE payment_intent_id = $1)', [pi.id]);
     if (!rows[0].exists) {
       await pool.query(
-        'INSERT INTO payments (payment_intent_id, amount, currency, sender_id, receiver_id, status, method) VALUES ($1, $2, $3, $4, $5, $6, $7)',
-        [pi.id, amount, currency, user_id, target_id, pi.status, 'card'] // 🔥 FIX 2: Use token user_id
+        'INSERT INTO payments (payment_intent_id, amount, currency, sender_id, receiver_id, status, method, target_email) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+        [pi.id, amount, currency, user_id, null, pi.status, 'card', target_email] // ✅ FIXED: Add target_email!
       );
     }
     // Notify via WebSocket
@@ -276,10 +275,13 @@ app.post('/webhook', async (req, res) => {
   }
   res.json({ status: 'received' });
 });
+// ✅ FIXED: list-payments (target_email column!)
 app.get('/list-payments', authenticateToken, async (req, res) => {
   try {
     const { rows } = await pool.query(
-      'SELECT payment_intent_id, amount, currency, status, created_at, target_email FROM payments WHERE sender_id = $1 OR receiver_id = $1',
+      `SELECT payment_intent_id, amount, currency, status, created_at, target_email 
+       FROM payments 
+       WHERE sender_id = $1 OR receiver_id = $1`,
       [req.claims.user_id]
     );
     res.json(rows.map(row => ({
@@ -287,10 +289,11 @@ app.get('/list-payments', authenticateToken, async (req, res) => {
       amount: row.amount,
       currency: row.currency,
       status: row.status,
-      target_email: row.target_email,
+      target_email: row.target_email || null,
       created_at: row.created_at.toISOString(),
     })));
   } catch (err) {
+    console.error('List payments error:', err); // ✅ FIXED: LOG ERROR!
     res.status(500).json({ error: `Error querying payments: ${err.message}` });
   }
 });
@@ -399,7 +402,7 @@ app.post('/signin', async (req, res) => {
 });
 // 🔥 SECURE FIX: Request Payment (Email → Real UUID)
 app.post('/request-payment', authenticateToken, async (req, res) => {
-  const { amount, currency, target_email } = req.body; // ← EMAIL not ID!
+  const { amount, currency, target_email } = req.body;
   const user_id = req.claims.user_id;
  
   try {
@@ -408,7 +411,7 @@ app.post('/request-payment', authenticateToken, async (req, res) => {
     if (targetUser.length === 0) {
       return res.status(404).json({ error: 'Target user not found' });
     }
-    const target_id = targetUser[0].id; // ← REAL UUID!
+    const target_id = targetUser[0].id;
    
     await pool.query(
       'INSERT INTO payment_requests (id, requester_id, target_id, amount, currency, status) VALUES ($1, $2, $3, $4, $5, $6)',
@@ -479,11 +482,11 @@ app.get('/user/preferences', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Error fetching preferences' });
   }
 });
-// ₿ CRYPTO TRANSFER - MOST SECURE! (ADDED EXACTLY!)
+// ₿ CRYPTO TRANSFER - MOST SECURE!
 app.post('/crypto-transfer', authenticateToken, async (req, res) => {
   try {
     const { to_address, amount, currency } = req.body;
-    const user_id = req.claims.user_id;
+    const user_id = req.claims.user_id; // ✅ FIXED: req.claims not req.user!
    
     // 1. JWT CHECKED ✅ (from authenticateToken)
     // 2. Get user's wallet
@@ -496,7 +499,7 @@ app.post('/crypto-transfer', authenticateToken, async (req, res) => {
     }
    
     // 3. SIMULATE BLOCKCHAIN (Real bitcoinjs-lib in production)
-    const txHash = `tx_${uuidv4().slice(0, 8)}`; // Real: bitcoinjs-lib tx
+    const txHash = `tx_${uuidv4().slice(0, 8)}`;
    
     // 4. Update wallet
     await pool.query(
@@ -506,8 +509,8 @@ app.post('/crypto-transfer', authenticateToken, async (req, res) => {
    
     // 5. Record crypto transaction
     await pool.query(
-      'INSERT INTO payments (payment_intent_id, amount, currency, sender_id, status, method, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)',
-      [txHash, amount, currency, user_id, 'succeeded', 'crypto', new Date()]
+      'INSERT INTO payments (payment_intent_id, amount, currency, sender_id, status, method, created_at, target_email) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+      [txHash, amount, currency, user_id, 'succeeded', 'crypto', new Date(), to_address]
     );
    
     // 6. WebSocket notification
