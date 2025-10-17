@@ -178,37 +178,6 @@ app.post('/login', async (req, res) => {
   }
 });
 
-app.post('/signin', async (req, res) => {
-  const { email, password } = req.body;
-  try {
-    const { rows } = await pool.query('SELECT id, password FROM users WHERE email = $1', [email]);
-    if (rows.length === 0) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-    const validPassword = await bcrypt.compare(password, rows[0].password);
-    if (!validPassword) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-    const token = jwt.sign({ user_id: rows[0].id }, process.env.JWT_SECRET, { expiresIn: '1h' });
-    res.json({ token });
-  } catch (err) {
-    res.status(500).json({ error: 'Error generating token' });
-  }
-});
-
-app.post('/user-by-email', authenticateToken, async (req, res) => {
-  const { email } = req.body;
-  try {
-    const { rows } = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
-    if (rows.length === 0) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-    res.json({ user_id: rows[0].id });
-  } catch (err) {
-    res.status(500).json({ error: 'Error querying user' });
-  }
-});
-
 app.get('/wallet/balance', authenticateToken, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT balance, currency FROM wallets WHERE user_id = $1 AND status = $2', [req.claims.user_id, 'active']);
