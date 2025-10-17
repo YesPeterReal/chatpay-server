@@ -367,35 +367,65 @@ app.post('/withdraw-wallet', authenticateToken, async (req, res) => {
   }
 });
 
-// 🔥 ADD auto-wallet creation on user login
+// ✅ SIGNIN + AUTO WALLET CREATION
 app.post('/signin', async (req, res) => {
   const { email, password } = req.body;
+
   try {
-    const { rows } = await pool.query('SELECT id, password FROM users WHERE email = $1', [email]);
+    // 1️⃣ Validate input
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required' });
+    }
+
+    // 2️⃣ Find user
+    const { rows } = await pool.query(
+      'SELECT id, password FROM users WHERE email = $1',
+      [email]
+    );
+
     if (rows.length === 0) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
+
+    // 3️⃣ Verify password
     const validPassword = await bcrypt.compare(password, rows[0].password);
     if (!validPassword) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
-    const token = jwt.sign({ user_id: rows[0].id }, process.env.JWT_SECRET, { expiresIn: '1h' });
-    
-    // CREATE WALLET AUTOMATICALLY (was missing!)
+
+    const userId = rows[0].id;
+
+    // 4️⃣ Generate JWT
+    const token = jwt.sign(
+      { user_id: userId },
+      process.env.JWT_SECRET || 'secret',
+      { expiresIn: '1h' }
+    );
+
+    // 5️⃣ Ensure wallet exists
     const { rows: walletRows } = await pool.query(
       'SELECT id FROM wallets WHERE user_id = $1 AND currency = $2',
-      [rows[0].id, 'EUR']
+      [userId, 'EUR']
     );
+
     if (walletRows.length === 0) {
       await pool.query(
-        'INSERT INTO wallets (id, user_id, balance, currency, status) VALUES (gen_random_uuid(), $1, 0, $2, $3)',
-        [rows[0].id, 'EUR', 'active']
+        `INSERT INTO wallets (id, user_id, balance, currency, status)
+         VALUES (gen_random_uuid(), $1, 0, $2, $3)`,
+        [userId, 'EUR', 'active']
       );
     }
-    
-    res.json({ token });
+
+    // 6️⃣ Return success
+    res.json({
+      message: 'Signin successful',
+      token,
+      user_id: userId,
+    });
+
   } catch (err) {
-    res.status(500).json({ error: 'Error generating token' });
+    console.error('❌ /signin error:', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
