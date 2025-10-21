@@ -15,9 +15,32 @@ const WebSocket = require('ws');
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/ws' });
-wss.on('connection', (ws) => {
+
+// Store WebSocket clients with user_id
+const clients = new Map();
+
+wss.on('connection', (ws, req) => {
   console.log('WebSocket client connected');
-  ws.on('close', () => console.log('WebSocket client disconnected'));
+  ws.on('message', (message) => {
+    try {
+      const data = JSON.parse(message);
+      if (data.user_id) {
+        clients.set(data.user_id, ws); // Map user_id to WebSocket
+        console.log(`WebSocket registered for user_id: ${data.user_id}`);
+      }
+    } catch (err) {
+      console.error('WebSocket message error:', err);
+    }
+  });
+  ws.on('close', () => {
+    console.log('WebSocket client disconnected');
+    for (const [user_id, client] of clients.entries()) {
+      if (client === ws) {
+        clients.delete(user_id);
+        break;
+      }
+    }
+  });
 });
 console.log('🪄 BUBBLES LIVE!'); // FORCE DEPLOY
 
@@ -106,6 +129,7 @@ pool.connect((err) => {
       currency VARCHAR(3) NOT NULL,
       status VARCHAR(20) DEFAULT 'pending',
       note TEXT,
+      target_email VARCHAR(255), -- 🔥 ADDED FOR USER B
       expires_at TIMESTAMP DEFAULT NOW() + INTERVAL '10 minutes',
       created_at TIMESTAMP DEFAULT NOW(),
       FOREIGN KEY (requester_id) REFERENCES users(id),
@@ -118,6 +142,12 @@ pool.connect((err) => {
             WHERE table_name = 'payments' AND column_name = 'target_email'
         ) THEN
             ALTER TABLE payments ADD COLUMN target_email VARCHAR(255);
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'transactions' AND column_name = 'target_email'
+        ) THEN
+            ALTER TABLE transactions ADD COLUMN target_email VARCHAR(255);
         END IF;
     END $$;
   `, (err) => {
@@ -224,32 +254,36 @@ app.post('/create-payment', authenticateToken, async (req, res) => {
 app.post('/generate-tvc', authenticateToken, async (req, res) => {
   const { amount, currency, target_email, note = '' } = req.body;
   const requester_id = req.claims.user_id;
-  
+
   try {
     const { rows: targetUser } = await pool.query('SELECT id FROM users WHERE email = $1', [target_email]);
     if (targetUser.length === 0) return res.status(404).json({ error: 'User not found' });
-    
+
+    const { rows: requesterUser } = await pool.query('SELECT email FROM users WHERE id = $1', [requester_id]);
+    const requester_email = requesterUser[0]?.email || 'unknown';
+
     const code = `CHAT-${Math.floor(100000 + Math.random() * 900000)}`;
-    
+
     await pool.query(`
-      INSERT INTO transactions (code, requester_id, amount, currency, note, status)
-      VALUES ($1, $2, $3, $4, $5, 'pending')
-    `, [code, requester_id, amount, currency, note]);
-    
-    // 🔥 SEND TO USER B SPECIFICALLY (SAFE + DIRECT!)
-       wss.clients.forEach(client => {
-       if (client.readyState === WebSocket.OPEN) {
-       client.send(JSON.stringify({
+      INSERT INTO transactions (code, requester_id, amount, currency, note, status, target_email)
+      VALUES ($1, $2, $3, $4, $5, 'pending', $6)
+    `, [code, requester_id, amount, currency, note, target_email]);
+
+    // Notify User B (target_email) specifically
+    const target_id = targetUser[0].id;
+    const ws = clients.get(target_id);
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
         event: 'tvc_generated',
         code,
         amount,
-       currency,
-      requester_email: req.body.target_email, // User B gets requester info
-      message: `New Request: ₵${amount} from ${requester_id} - Code: ${code}`
-    }));
-  }
- });
-    
+        currency,
+        requester_email,
+        target_email,
+        message: `New Request: ₵${amount} from ${requester_email} - Code: ${code}`
+      }));
+    }
+
     res.json({ code, message: `Request sent! Code: ${code}` });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -259,17 +293,17 @@ app.post('/generate-tvc', authenticateToken, async (req, res) => {
 app.post('/confirm-tvc', authenticateToken, async (req, res) => {
   const { code } = req.body;
   const sender_id = req.claims.user_id;
-  
+
   try {
     const { rows } = await pool.query(`
       SELECT * FROM transactions 
       WHERE code = $1 AND status = 'pending' AND expires_at > NOW()
     `, [code]);
-    
+
     if (rows.length === 0) return res.status(400).json({ error: 'Invalid or expired code' });
-    
+
     const { requester_id, amount, currency, target_email } = rows[0];
-    
+
     const { rows: senderWallet } = await pool.query(
       'SELECT balance FROM wallets WHERE user_id = $1 AND currency = $2 AND status = $3',
       [sender_id, currency, 'active']
@@ -277,7 +311,7 @@ app.post('/confirm-tvc', authenticateToken, async (req, res) => {
     if (senderWallet.length === 0 || senderWallet[0].balance < amount) {
       return res.status(400).json({ error: 'Insufficient balance' });
     }
-    
+
     await pool.query(
       'UPDATE wallets SET balance = balance - $1 WHERE user_id = $2 AND currency = $3 AND status = $4',
       [amount, sender_id, currency, 'active']
@@ -286,20 +320,22 @@ app.post('/confirm-tvc', authenticateToken, async (req, res) => {
       'UPDATE wallets SET balance = balance + $1 WHERE user_id = $2 AND currency = $3 AND status = $4',
       [amount, requester_id, currency, 'active']
     );
-    
+
     await pool.query(
       'UPDATE transactions SET sender_id = $1, status = $2 WHERE code = $3',
       [sender_id, 'completed', code]
     );
-    
+
     await pool.query(
       'INSERT INTO payments (payment_intent_id, amount, currency, sender_id, receiver_id, status, method, created_at, target_email) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8)',
       [uuidv4(), amount, currency, sender_id, requester_id, 'succeeded', 'tvc', target_email]
     );
-    
-    wss.clients.forEach(client => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify({
+
+    // Notify both users
+    [sender_id, requester_id].forEach(user_id => {
+      const ws = clients.get(user_id);
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
           event: 'tvc_completed',
           code,
           amount,
@@ -310,10 +346,34 @@ app.post('/confirm-tvc', authenticateToken, async (req, res) => {
         }));
       }
     });
-    
+
     res.json({ success: true, message: `✅ ₵${amount} sent! Ref: ${code}` });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/pending-tvc', authenticateToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT t.code, t.amount, t.currency, t.status, t.note, t.created_at, u.email as requester_email
+      FROM transactions t
+      JOIN users u ON t.requester_id = u.id
+      WHERE t.target_email = (SELECT email FROM users WHERE id = $1)
+      AND t.status = 'pending' AND t.expires_at > NOW()
+      ORDER BY t.created_at DESC
+    `, [req.claims.user_id]);
+    res.json(rows.map(row => ({
+      code: row.code,
+      amount: row.amount,
+      currency: row.currency,
+      status: row.status,
+      requester_email: row.requester_email,
+      created_at: row.created_at.toISOString(),
+    })));
+  } catch (err) {
+    console.error('Pending TVC error:', err);
+    res.status(500).json({ error: 'Error querying pending TVC' });
   }
 });
 
@@ -482,22 +542,26 @@ app.post('/request-payment', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Target user not found' });
     }
     const target_id = targetUser[0].id;
- 
+
     await pool.query(
       'INSERT INTO payment_requests (id, requester_id, target_id, amount, currency, status) VALUES ($1, $2, $3, $4, $5, $6)',
       [uuidv4(), user_id, target_id, amount, currency, 'pending']
     );
- 
-    wss.clients.forEach(client => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify({
-          event: 'payment_requested',
-          amount,
-          currency,
-          message: `Payment requested: ${amount} ${currency} to ${target_email}`
-        }));
-      }
-    });
+
+    const { rows: requesterUser } = await pool.query('SELECT email FROM users WHERE id = $1', [user_id]);
+    const requester_email = requesterUser[0]?.email || 'unknown';
+
+    const ws = clients.get(target_id);
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        event: 'payment_requested',
+        amount,
+        currency,
+        requester_email,
+        message: `Payment requested: ${amount} ${currency} from ${requester_email}`
+      }));
+    }
+
     res.json({ status: 'request_created' });
   } catch (err) {
     res.status(500).json({ error: `Error: ${err.message}` });
@@ -557,7 +621,7 @@ app.post('/crypto-transfer', authenticateToken, async (req, res) => {
   try {
     const { to_address, amount, currency } = req.body;
     const user_id = req.claims.user_id;
- 
+
     const { rows: walletRows } = await pool.query(
       'SELECT balance FROM wallets WHERE user_id = $1 AND currency = $2 AND status = $3',
       [user_id, currency, 'active']
@@ -565,19 +629,19 @@ app.post('/crypto-transfer', authenticateToken, async (req, res) => {
     if (walletRows.length === 0 || walletRows[0].balance < amount) {
       return res.status(400).json({ error: 'Insufficient balance' });
     }
- 
+
     const txHash = `tx_${uuidv4().slice(0, 8)}`;
- 
+
     await pool.query(
       'UPDATE wallets SET balance = balance - $1 WHERE user_id = $2 AND currency = $3 AND status = $4',
       [amount, user_id, currency, 'active']
     );
- 
+
     await pool.query(
       'INSERT INTO payments (payment_intent_id, amount, currency, sender_id, status, method, created_at, target_email) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
       [txHash, amount, currency, user_id, 'succeeded', 'crypto', new Date(), to_address]
     );
- 
+
     wss.clients.forEach(client => {
       if (client.readyState === WebSocket.OPEN) {
         client.send(JSON.stringify({
@@ -590,7 +654,7 @@ app.post('/crypto-transfer', authenticateToken, async (req, res) => {
         }));
       }
     });
- 
+
     res.json({
       message: `₿ ${amount} ${currency} sent! Tx: ${txHash}`,
       txHash
@@ -604,7 +668,7 @@ app.post('/transfer', authenticateToken, async (req, res) => {
   try {
     const { to_wallet, amount } = req.body;
     const from_wallet = req.claims.user_id;
- 
+
     const { rows: fromWallet } = await pool.query(
       'SELECT balance FROM wallets WHERE user_id = $1 AND currency = $2',
       [from_wallet, 'EUR']
@@ -613,11 +677,11 @@ app.post('/transfer', authenticateToken, async (req, res) => {
       'SELECT balance FROM wallets WHERE user_id = $1 AND currency = $2',
       [to_wallet, 'EUR']
     );
- 
+
     if (fromWallet.length === 0 || fromWallet[0].balance < amount) {
       return res.status(400).json({ error: 'Insufficient balance' });
     }
- 
+
     await pool.query(
       'UPDATE wallets SET balance = balance - $1 WHERE user_id = $2 AND currency = $3',
       [amount, from_wallet, 'EUR']
@@ -626,7 +690,7 @@ app.post('/transfer', authenticateToken, async (req, res) => {
       'UPDATE wallets SET balance = balance + $1 WHERE user_id = $2 AND currency = $3',
       [amount, to_wallet, 'EUR']
     );
- 
+
     res.json({ message: `✅ ${amount} transferred to ${to_wallet}` });
   } catch (error) {
     res.status(400).json({ error: error.message });
