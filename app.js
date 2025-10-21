@@ -135,6 +135,14 @@ pool.connect((err) => {
       FOREIGN KEY (requester_id) REFERENCES users(id),
       FOREIGN KEY (sender_id) REFERENCES users(id)
     );
+    CREATE TABLE IF NOT EXISTS notifications (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id uuid NOT NULL,
+      message TEXT NOT NULL,
+      is_read BOOLEAN DEFAULT FALSE,
+      created_at TIMESTAMP DEFAULT NOW(),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
     DO $$
     BEGIN
         IF NOT EXISTS (
@@ -152,7 +160,7 @@ pool.connect((err) => {
     END $$;
   `, (err) => {
     if (err) console.error('Error creating tables:', err);
-    else console.log('✅ Tables + TVC + target_email = READY!');
+    else console.log('✅ Tables + TVC + notifications = READY!');
   });
 });
 
@@ -214,7 +222,7 @@ app.post('/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
     const token = jwt.sign({ user_id: rows[0].id }, process.env.JWT_SECRET, { expiresIn: '1h' });
-    res.json({ token });
+    res.json({ token, user_id: rows[0].id });
   } catch (err) {
     res.status(500).json({ error: 'Error generating token' });
   }
@@ -269,8 +277,14 @@ app.post('/generate-tvc', authenticateToken, async (req, res) => {
       VALUES ($1, $2, $3, $4, $5, 'pending', $6)
     `, [code, requester_id, amount, currency, note, target_email]);
 
-    // Notify User B (target_email) specifically
+    // Store notification for User B
     const target_id = targetUser[0].id;
+    await pool.query(
+      'INSERT INTO notifications (user_id, message, created_at) VALUES ($1, $2, NOW())',
+      [target_id, `New Request: ₵${amount} from ${requester_email} - Code: ${code}`]
+    );
+
+    // Notify User B via WebSocket
     const ws = clients.get(target_id);
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({
@@ -331,6 +345,12 @@ app.post('/confirm-tvc', authenticateToken, async (req, res) => {
       [uuidv4(), amount, currency, sender_id, requester_id, 'succeeded', 'tvc', target_email]
     );
 
+    // Mark notification as read
+    await pool.query(
+      'UPDATE notifications SET is_read = TRUE WHERE user_id = $1 AND message LIKE $2',
+      [sender_id, `%Code: ${code}%`]
+    );
+
     // Notify both users
     [sender_id, requester_id].forEach(user_id => {
       const ws = clients.get(user_id);
@@ -350,6 +370,24 @@ app.post('/confirm-tvc', authenticateToken, async (req, res) => {
     res.json({ success: true, message: `✅ ₵${amount} sent! Ref: ${code}` });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/notifications', authenticateToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT id, message, created_at, is_read FROM notifications WHERE user_id = $1 AND is_read = FALSE ORDER BY created_at DESC',
+      [req.claims.user_id]
+    );
+    res.json(rows.map(row => ({
+      id: row.id,
+      message: row.message,
+      created_at: row.created_at.toISOString(),
+      is_read: row.is_read
+    })));
+  } catch (err) {
+    console.error('Notifications error:', err);
+    res.status(500).json({ error: 'Error querying notifications' });
   }
 });
 
@@ -551,6 +589,13 @@ app.post('/request-payment', authenticateToken, async (req, res) => {
     const { rows: requesterUser } = await pool.query('SELECT email FROM users WHERE id = $1', [user_id]);
     const requester_email = requesterUser[0]?.email || 'unknown';
 
+    // Store notification for User B
+    await pool.query(
+      'INSERT INTO notifications (user_id, message, created_at) VALUES ($1, $2, NOW())',
+      [target_id, `Payment requested: ${amount} ${currency} from ${requester_email}`]
+    );
+
+    // Notify User B via WebSocket
     const ws = clients.get(target_id);
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({
