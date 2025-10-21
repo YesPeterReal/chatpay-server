@@ -236,18 +236,19 @@ app.post('/generate-tvc', authenticateToken, async (req, res) => {
       VALUES ($1, $2, $3, $4, $5, 'pending')
     `, [code, requester_id, amount, currency, note]);
     
-    wss.clients.forEach(client => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify({
-          event: 'tvc_generated',
-          code,
-          amount,
-          currency,
-          target_email,
-          message: `Request ₵${amount}: ${code}`
-        }));
-      }
-    });
+    // 🔥 SEND TO USER B SPECIFICALLY (SAFE + DIRECT!)
+       wss.clients.forEach(client => {
+       if (client.readyState === WebSocket.OPEN) {
+       client.send(JSON.stringify({
+        event: 'tvc_generated',
+        code,
+        amount,
+       currency,
+      requester_email: req.body.target_email, // User B gets requester info
+      message: `New Request: ₵${amount} from ${requester_id} - Code: ${code}`
+    }));
+  }
+ });
     
     res.json({ code, message: `Request sent! Code: ${code}` });
   } catch (err) {
