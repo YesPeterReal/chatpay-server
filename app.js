@@ -129,7 +129,7 @@ pool.connect((err) => {
       currency VARCHAR(3) NOT NULL,
       status VARCHAR(20) DEFAULT 'pending',
       note TEXT,
-      target_email VARCHAR(255), -- 🔥 ADDED FOR USER B
+      target_email VARCHAR(255),
       expires_at TIMESTAMP DEFAULT NOW() + INTERVAL '10 minutes',
       created_at TIMESTAMP DEFAULT NOW(),
       FOREIGN KEY (requester_id) REFERENCES users(id),
