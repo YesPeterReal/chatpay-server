@@ -81,7 +81,7 @@ pool.connect((err) => {
       id uuid PRIMARY KEY,
       email VARCHAR(255) UNIQUE NOT NULL,
       password TEXT NOT NULL,
-      name VARCHAR(255) NOT NULL,
+      name VARCHAR(255) NOT NOT NULL,
       surname VARCHAR(255) NOT NULL,
       gender VARCHAR(50),
       phone VARCHAR(20),
@@ -281,7 +281,7 @@ app.post('/generate-tvc', authenticateToken, async (req, res) => {
     const target_id = targetUser[0].id;
     await pool.query(
       'INSERT INTO notifications (user_id, message, created_at) VALUES ($1, $2, NOW())',
-      [target_id, `New Request: ₵${amount} from ${requester_email} - Code: ${code}`]
+      [target_id, `New Request: ₵${amount} ${currency} from ${requester_email} - Code: ${code}`]
     );
 
     // Notify User B via WebSocket
@@ -294,7 +294,7 @@ app.post('/generate-tvc', authenticateToken, async (req, res) => {
         currency,
         requester_email,
         target_email,
-        message: `New Request: ₵${amount} from ${requester_email} - Code: ${code}`
+        message: `New Request: ₵${amount} ${currency} from ${requester_email} - Code: ${code}`
       }));
     }
 
@@ -362,7 +362,7 @@ app.post('/confirm-tvc', authenticateToken, async (req, res) => {
           currency,
           from: sender_id,
           to: requester_id,
-          message: `✅ ₵${amount} transferred!`
+          message: `✅ ₵${amount} ${currency} transferred!`
         }));
       }
     });
@@ -388,6 +388,20 @@ app.get('/notifications', authenticateToken, async (req, res) => {
   } catch (err) {
     console.error('Notifications error:', err);
     res.status(500).json({ error: 'Error querying notifications' });
+  }
+});
+
+app.post('/notifications/read', authenticateToken, async (req, res) => {
+  try {
+    const { notification_id } = req.body;
+    await pool.query(
+      'UPDATE notifications SET is_read = TRUE WHERE id = $1 AND user_id = $2',
+      [notification_id, req.claims.user_id]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Mark notification read error:', err);
+    res.status(500).json({ error: 'Error marking notification as read' });
   }
 });
 
@@ -655,7 +669,9 @@ app.get('/user/preferences', authenticateToken, async (req, res) => {
       notificationsEnabled: true,
       theme: 'day',
       currency: 'EUR',
-      language: 'en'
+      language: 'en',
+      name: rows[0].name,
+      email: rows[0].email
     });
   } catch (err) {
     res.status(500).json({ error: 'Error fetching preferences' });
