@@ -111,8 +111,7 @@ pool.connect((err) => {
       FOREIGN KEY (requester_id) REFERENCES users(id),
       FOREIGN KEY (sender_id) REFERENCES users(id)
     );
-    -- ✅ FIXED: ADD target_email COLUMN IF MISSING!
-    DO \$\$
+    DO $$
     BEGIN
         IF NOT EXISTS (
             SELECT 1 FROM information_schema.columns
@@ -120,7 +119,7 @@ pool.connect((err) => {
         ) THEN
             ALTER TABLE payments ADD COLUMN target_email VARCHAR(255);
         END IF;
-    END\$\$;
+    END $$;
   `, (err) => {
     if (err) console.error('Error creating tables:', err);
     else console.log('✅ Tables + TVC + target_email = READY!');
@@ -219,52 +218,7 @@ app.get('/payments/received', authenticateToken, async (req, res) => {
 });
 
 app.post('/create-payment', authenticateToken, async (req, res) => {
-  const { amount, currency, target_email } = req.body;
-  const user_id = req.claims.user_id;
-  try {
-    const { rows: senderWallet } = await pool.query(
-      'SELECT id FROM wallets WHERE user_id = $1 AND currency = $2',
-      [user_id, currency]
-    );
-    if (senderWallet.length === 0) {
-      await pool.query(
-        'INSERT INTO wallets (id, user_id, balance, currency, status) VALUES (gen_random_uuid(), $1, 0, $2, $3)',
-        [user_id, currency, 'active']
-      );
-    }
-    const pi = await stripe.paymentIntents.create({
-      amount: Math.round(amount * 100),
-      currency,
-      payment_method_types: ['card'],
-    });
-    const { rows } = await pool.query('SELECT EXISTS(SELECT 1 FROM payments WHERE payment_intent_id = $1)', [pi.id]);
-    if (!rows[0].exists) {
-      await pool.query(
-        'INSERT INTO payments (payment_intent_id, amount, currency, sender_id, receiver_id, status, method, target_email) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
-        [pi.id, amount, currency, user_id, null, pi.status, 'card', target_email]
-      );
-    }
-    wss.clients.forEach(client => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify({
-          event: 'payment_sent',
-          paymentIntentId: pi.id,
-          amount,
-          currency,
-          message: `Payment sent: ${amount} ${currency}`
-        }));
-      }
-    });
-    res.json({
-      paymentIntentId: pi.id,
-      amount,
-      currency,
-      status: pi.status,
-      createdAt: new Date().toISOString(),
-    });
-  } catch (err) {
-    res.status(500).json({ error: `Error creating payment: ${err.message}` });
-  }
+  return res.status(403).json({ error: 'Direct payments disabled. Use /generate-tvc for secure transfers.' });
 });
 
 app.post('/generate-tvc', authenticateToken, async (req, res) => {
