@@ -97,7 +97,6 @@ pool.connect((err) => {
       created_at TIMESTAMP DEFAULT NOW(),
       FOREIGN KEY (requester_id) REFERENCES users(id) ON DELETE CASCADE
     );
-    -- ✅ TVC SECURITY TABLE
     CREATE TABLE IF NOT EXISTS transactions (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       code VARCHAR(20) UNIQUE NOT NULL,
@@ -219,7 +218,6 @@ app.get('/payments/received', authenticateToken, async (req, res) => {
   }
 });
 
-// 🔥 FIXED create-payment (target_email instead of target_id!)
 app.post('/create-payment', authenticateToken, async (req, res) => {
   const { amount, currency, target_email } = req.body;
   const user_id = req.claims.user_id;
@@ -246,7 +244,6 @@ app.post('/create-payment', authenticateToken, async (req, res) => {
         [pi.id, amount, currency, user_id, null, pi.status, 'card', target_email]
       );
     }
-    // 🔥 WEBSOCKET NOTIFICATION
     wss.clients.forEach(client => {
       if (client.readyState === WebSocket.OPEN) {
         client.send(JSON.stringify({
@@ -270,7 +267,6 @@ app.post('/create-payment', authenticateToken, async (req, res) => {
   }
 });
 
-// 🔥 TVC: GENERATE CODE
 app.post('/generate-tvc', authenticateToken, async (req, res) => {
   const { amount, currency, target_email, note = '' } = req.body;
   const requester_id = req.claims.user_id;
@@ -305,7 +301,6 @@ app.post('/generate-tvc', authenticateToken, async (req, res) => {
   }
 });
 
-// 🔥 TVC: CONFIRM TRANSFER
 app.post('/confirm-tvc', authenticateToken, async (req, res) => {
   const { code } = req.body;
   const sender_id = req.claims.user_id;
@@ -318,7 +313,7 @@ app.post('/confirm-tvc', authenticateToken, async (req, res) => {
     
     if (rows.length === 0) return res.status(400).json({ error: 'Invalid or expired code' });
     
-    const { requester_id, amount, currency } = rows[0];
+    const { requester_id, amount, currency, target_email } = rows[0];
     
     const { rows: senderWallet } = await pool.query(
       'SELECT balance FROM wallets WHERE user_id = $1 AND currency = $2 AND status = $3',
@@ -343,8 +338,7 @@ app.post('/confirm-tvc', authenticateToken, async (req, res) => {
     );
     
     await pool.query(
-      'INSERT INTO payments (payment_intent_id, amount, currency, sender_id, receiver_id, status, method, created_at, target_email) 
-      VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8)',
+      'INSERT INTO payments (payment_intent_id, amount, currency, sender_id, receiver_id, status, method, created_at, target_email) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8)',
       [uuidv4(), amount, currency, sender_id, requester_id, 'succeeded', 'tvc', target_email]
     );
     
@@ -404,7 +398,6 @@ app.post('/webhook', async (req, res) => {
   res.json({ status: 'received' });
 });
 
-// 🔥 FIXED: list-payments (1 LINE = NEWEST FIRST!)
 app.get('/list-payments', authenticateToken, async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -428,7 +421,6 @@ app.get('/list-payments', authenticateToken, async (req, res) => {
   }
 });
 
-// 🔥 RESTORE MISSING ENDPOINTS FOR BUBBLES
 app.get('/recent-transactions', authenticateToken, async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -481,7 +473,6 @@ app.post('/withdraw-wallet', authenticateToken, async (req, res) => {
   }
 });
 
-// ✅ SIGNIN + AUTO WALLET CREATION
 app.post('/signin', async (req, res) => {
   const { email, password } = req.body;
   try {
@@ -527,7 +518,6 @@ app.post('/signin', async (req, res) => {
   }
 });
 
-// 🔥 SECURE FIX: Request Payment
 app.post('/request-payment', authenticateToken, async (req, res) => {
   const { amount, currency, target_email } = req.body;
   const user_id = req.claims.user_id;
@@ -559,7 +549,6 @@ app.post('/request-payment', authenticateToken, async (req, res) => {
   }
 });
 
-// 🔥 FIX: Fund Wallet
 app.post('/fund-wallet', authenticateToken, async (req, res) => {
   const { amount, currency } = req.body;
   try {
@@ -592,7 +581,6 @@ app.post('/fund-wallet', authenticateToken, async (req, res) => {
   }
 });
 
-// 🔥 FIX: User Preferences
 app.get('/user/preferences', authenticateToken, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM users WHERE id = $1', [req.claims.user_id]);
@@ -610,7 +598,6 @@ app.get('/user/preferences', authenticateToken, async (req, res) => {
   }
 });
 
-// ₿ CRYPTO TRANSFER - FIXED!
 app.post('/crypto-transfer', authenticateToken, async (req, res) => {
   try {
     const { to_address, amount, currency } = req.body;
@@ -658,7 +645,6 @@ app.post('/crypto-transfer', authenticateToken, async (req, res) => {
   }
 });
 
-// WALLET-TO-WALLET TRANSFER
 app.post('/transfer', authenticateToken, async (req, res) => {
   try {
     const { to_wallet, amount } = req.body;
