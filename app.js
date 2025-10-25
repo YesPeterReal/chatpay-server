@@ -1,5 +1,5 @@
 console.log('TVC FLOW LIVE!');
-// Force commit for Render deployment
+// Force commit for Render deploymentt
 if (process.env.NODE_ENV !== 'production') {
   require('dotenv').config();
 }
@@ -386,48 +386,43 @@ app.post('/withdraw-wallet', authenticateToken, async (req, res) => {
   }
 });
 
-app.post('/signin', async (req, res) => {
+// === LOGIN: SECURE & RETURNS TOKEN + USER_ID ===
+app.post('/login', async (req, res) => {
   const { email, password } = req.body;
   try {
     if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password are required' });
+      return res.status(400).json({ error: 'Email and password required' });
     }
-    const { rows } = await pool.query(
-      'SELECT id, password FROM users WHERE email = $1',
-      [email]
-    );
+
+    const { rows } = await pool.query('SELECT id, password FROM users WHERE email = $1', [email]);
     if (rows.length === 0) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
-    const validPassword = await bcrypt.compare(password, rows[0].password);
-    if (!validPassword) {
+
+    const valid = await bcrypt.compare(password, rows[0].password);
+    if (!valid) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
+
     const userId = rows[0].id;
-    const token = jwt.sign(
-      { user_id: userId },
-      process.env.JWT_SECRET || 'secret',
-      { expiresIn: '1h' }
-    );
-    const { rows: walletRows } = await pool.query(
+    const token = jwt.sign({ user_id: userId }, process.env.JWT_SECRET, { expiresIn: '24h' });
+
+    // Auto-create wallet if missing
+    const { rows: wallet } = await pool.query(
       'SELECT id FROM wallets WHERE user_id = $1 AND currency = $2',
       [userId, 'EUR']
     );
-    if (walletRows.length === 0) {
+    if (wallet.length === 0) {
       await pool.query(
-        `INSERT INTO wallets (id, user_id, balance, currency, status)
-         VALUES (gen_random_uuid(), $1, 0, $2, $3)`,
+        'INSERT INTO wallets (id, user_id, balance, currency, status) VALUES (gen_random_uuid(), $1, 0, $2, $3)',
         [userId, 'EUR', 'active']
       );
     }
-    res.json({
-      message: 'Signin successful',
-      token,
-      user_id: userId,
-    });
+
+    res.json({ token, user_id: userId });
   } catch (err) {
-    console.error('❌ /signin error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Login error:', err);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
