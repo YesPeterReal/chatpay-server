@@ -1,5 +1,5 @@
 console.log('TVC FLOW LIVE!');
-// Force commit for Render deploymentt
+// Force commit for Render deployment
 if (process.env.NODE_ENV !== 'production') {
   require('dotenv').config();
 }
@@ -143,6 +143,52 @@ const authenticateToken = (req, res, next) => {
     next();
   });
 };
+
+// === RESTORED: /signin (EXACTLY AS BEFORE) ===
+app.post('/signin', async (req, res) => {
+  const { email, password } = req.body;
+  try {
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required' });
+    }
+    const { rows } = await pool.query(
+      'SELECT id, password FROM users WHERE email = $1',
+      [email]
+    );
+    if (rows.length === 0) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    const validPassword = await bcrypt.compare(password, rows[0].password);
+    if (!validPassword) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    const userId = rows[0].id;
+    const token = jwt.sign(
+      { user_id: userId },
+      process.env.JWT_SECRET || 'secret',
+      { expiresIn: '1h' }
+    );
+    const { rows: walletRows } = await pool.query(
+      'SELECT id FROM wallets WHERE user_id = $1 AND currency = $2',
+      [userId, 'EUR']
+    );
+    if (walletRows.length === 0) {
+      await pool.query(
+        `INSERT INTO wallets (id, user_id, balance, currency, status)
+         VALUES (gen_random_uuid(), $1, 0, $2, $3)`,
+        [userId, 'EUR', 'active']
+      );
+    }
+    res.json({
+      message: 'Signin successful',
+      token,
+      user_id: userId,
+    });
+  } catch (err) {
+    console.error('❌ /signin error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 // === TVC: DIRECT SEND (SENDER → RECEIVER) ===
 app.post('/generate-tvc', authenticateToken, async (req, res) => {
@@ -314,9 +360,9 @@ app.post('/webhook', async (req, res) => {
 app.get('/list-payments', authenticateToken, async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT payment_intent_id, amount, currency, status, created_at, target_email 
-       FROM payments 
-       WHERE sender_id = $1 OR receiver_id = $1 
+      `SELECT payment_intent_id, amount, currency, status, created_at, target_email
+       FROM payments
+       WHERE sender_id = $1 OR receiver_id = $1
        ORDER BY created_at DESC`,
       [req.claims.user_id]
     );
@@ -386,46 +432,6 @@ app.post('/withdraw-wallet', authenticateToken, async (req, res) => {
   }
 });
 
-// === LOGIN: SECURE & RETURNS TOKEN + USER_ID ===
-app.post('/login', async (req, res) => {
-  const { email, password } = req.body;
-  try {
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password required' });
-    }
-
-    const { rows } = await pool.query('SELECT id, password FROM users WHERE email = $1', [email]);
-    if (rows.length === 0) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-
-    const valid = await bcrypt.compare(password, rows[0].password);
-    if (!valid) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-
-    const userId = rows[0].id;
-    const token = jwt.sign({ user_id: userId }, process.env.JWT_SECRET, { expiresIn: '24h' });
-
-    // Auto-create wallet if missing
-    const { rows: wallet } = await pool.query(
-      'SELECT id FROM wallets WHERE user_id = $1 AND currency = $2',
-      [userId, 'EUR']
-    );
-    if (wallet.length === 0) {
-      await pool.query(
-        'INSERT INTO wallets (id, user_id, balance, currency, status) VALUES (gen_random_uuid(), $1, 0, $2, $3)',
-        [userId, 'EUR', 'active']
-      );
-    }
-
-    res.json({ token, user_id: userId });
-  } catch (err) {
-    console.error('Login error:', err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
 app.post('/request-payment', authenticateToken, async (req, res) => {
   const { amount, currency, target_email } = req.body;
   const user_id = req.claims.user_id;
@@ -435,22 +441,16 @@ app.post('/request-payment', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Target user not found' });
     }
     const target_id = targetUser[0].id;
-
     await pool.query(
       'INSERT INTO payment_requests (id, requester_id, target_id, amount, currency, status) VALUES ($1, $2, $3, $4, $5, $6)',
       [uuidv4(), user_id, target_id, amount, currency, 'pending']
     );
-
     const { rows: requesterUser } = await pool.query('SELECT email FROM users WHERE id = $1', [user_id]);
     const requester_email = requesterUser[0]?.email || 'unknown';
-
-    // Store notification for User B
     await pool.query(
       'INSERT INTO notifications (user_id, message, created_at) VALUES ($1, $2, NOW())',
       [target_id, `Payment requested: ${amount} ${currency} from ${requester_email}`]
     );
-
-    // Notify User B via WebSocket
     const ws = clients.get(target_id);
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({
@@ -461,7 +461,6 @@ app.post('/request-payment', authenticateToken, async (req, res) => {
         message: `Payment requested: ${amount} ${currency} from ${requester_email}`
       }));
     }
-
     res.json({ status: 'request_created' });
   } catch (err) {
     res.status(500).json({ error: `Error: ${err.message}` });
@@ -523,7 +522,6 @@ app.post('/crypto-transfer', authenticateToken, async (req, res) => {
   try {
     const { to_address, amount, currency } = req.body;
     const user_id = req.claims.user_id;
-
     const { rows: walletRows } = await pool.query(
       'SELECT balance FROM wallets WHERE user_id = $1 AND currency = $2 AND status = $3',
       [user_id, currency, 'active']
@@ -531,19 +529,15 @@ app.post('/crypto-transfer', authenticateToken, async (req, res) => {
     if (walletRows.length === 0 || walletRows[0].balance < amount) {
       return res.status(400).json({ error: 'Insufficient balance' });
     }
-
     const txHash = `tx_${uuidv4().slice(0, 8)}`;
-
     await pool.query(
       'UPDATE wallets SET balance = balance - $1 WHERE user_id = $2 AND currency = $3 AND status = $4',
       [amount, user_id, currency, 'active']
     );
-
     await pool.query(
-      'INSERT INTO payments (payment_intent_id, amount, currency, sender_id, status, method, created_at, target_email) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+      'INSERT INTO payments (payment_intent_id, amount, currency, sender_id, status, method, created_at, target_email) VALUES ($ Poem1, $2, $3, $4, $5, $6, $7, $8)',
       [txHash, amount, currency, user_id, 'succeeded', 'crypto', new Date(), to_address]
     );
-
     wss.clients.forEach(client => {
       if (client.readyState === WebSocket.OPEN) {
         client.send(JSON.stringify({
@@ -556,7 +550,6 @@ app.post('/crypto-transfer', authenticateToken, async (req, res) => {
         }));
       }
     });
-
     res.json({
       message: `₿ ${amount} ${currency} sent! Tx: ${txHash}`,
       txHash
@@ -570,7 +563,6 @@ app.post('/transfer', authenticateToken, async (req, res) => {
   try {
     const { to_wallet, amount } = req.body;
     const from_wallet = req.claims.user_id;
-
     const { rows: fromWallet } = await pool.query(
       'SELECT balance FROM wallets WHERE user_id = $1 AND currency = $2',
       [from_wallet, 'EUR']
@@ -579,11 +571,9 @@ app.post('/transfer', authenticateToken, async (req, res) => {
       'SELECT balance FROM wallets WHERE user_id = $1 AND currency = $2',
       [to_wallet, 'EUR']
     );
-
     if (fromWallet.length === 0 || fromWallet[0].balance < amount) {
       return res.status(400).json({ error: 'Insufficient balance' });
     }
-
     await pool.query(
       'UPDATE wallets SET balance = balance - $1 WHERE user_id = $2 AND currency = $3',
       [amount, from_wallet, 'EUR']
@@ -592,7 +582,6 @@ app.post('/transfer', authenticateToken, async (req, res) => {
       'UPDATE wallets SET balance = balance + $1 WHERE user_id = $2 AND currency = $3',
       [amount, to_wallet, 'EUR']
     );
-
     res.json({ message: `✅ ${amount} transferred to ${to_wallet}` });
   } catch (error) {
     res.status(400).json({ error: error.message });
