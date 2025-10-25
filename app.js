@@ -1,4 +1,5 @@
-// Force commit for Render deployment with updated env handling
+console.log('TVC FLOW LIVE!');
+// Force commit for Render deployment
 if (process.env.NODE_ENV !== 'production') {
   require('dotenv').config();
 }
@@ -16,7 +17,7 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/ws' });
 
-// Store WebSocket clients with user_id
+// WebSocket clients map
 const clients = new Map();
 
 wss.on('connection', (ws, req) => {
@@ -25,7 +26,7 @@ wss.on('connection', (ws, req) => {
     try {
       const data = JSON.parse(message);
       if (data.user_id) {
-        clients.set(data.user_id, ws); // Map user_id to WebSocket
+        clients.set(data.user_id, ws);
         console.log(`WebSocket registered for user_id: ${data.user_id}`);
       }
     } catch (err) {
@@ -33,7 +34,6 @@ wss.on('connection', (ws, req) => {
     }
   });
   ws.on('close', () => {
-    console.log('WebSocket client disconnected');
     for (const [user_id, client] of clients.entries()) {
       if (client === ws) {
         clients.delete(user_id);
@@ -42,9 +42,9 @@ wss.on('connection', (ws, req) => {
     }
   });
 });
-console.log('🪄 BUBBLES LIVE!'); // FORCE DEPLOY
+console.log('BUBBLES LIVE!');
 
-// 🔓 CORS FIRST - UNLOCKS ALL DOORS!
+// CORS
 app.use(cors({
   origin: process.env.NODE_ENV === 'production' ? 'https://chatpay-frontend.onrender.com' : 'http://localhost:3000',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -53,13 +53,9 @@ app.use(cors({
 }));
 
 app.use((req, res, next) => {
-  if (req.originalUrl === '/webhook') {
-    next();
-  } else {
-    bodyParser.json()(req, res, next);
-  }
+  if (req.originalUrl === '/webhook') next();
+  else bodyParser.json()(req, res, next);
 });
-
 app.use('/webhook', bodyParser.raw({ type: 'application/json' }));
 
 const pool = new Pool({
@@ -72,22 +68,20 @@ const pool = new Pool({
 
 pool.connect((err) => {
   if (err) {
-    console.error('Error connecting to database:', err);
+    console.error('DB error:', err);
     process.exit(1);
   }
-  console.log('Successfully connected to database!');
+  console.log('DB connected!');
   pool.query(`
     CREATE TABLE IF NOT EXISTS users (
       id uuid PRIMARY KEY,
       email VARCHAR(255) UNIQUE NOT NULL,
       password TEXT NOT NULL,
-      name VARCHAR(255) NOT NOT NULL,
+      name VARCHAR(255) NOT NULL,
       surname VARCHAR(255) NOT NULL,
-      gender VARCHAR(50),
       phone VARCHAR(20),
-      dob DATE,
-      reset_token VARCHAR(255),
-      reset_token_expiry TIMESTAMP
+      gender VARCHAR(50),
+      dob DATE
     );
     CREATE TABLE IF NOT EXISTS wallets (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -109,16 +103,6 @@ pool.connect((err) => {
       method VARCHAR(50) NOT NULL,
       created_at TIMESTAMP DEFAULT NOW(),
       target_email VARCHAR(255)
-    );
-    CREATE TABLE IF NOT EXISTS payment_requests (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      requester_id uuid,
-      target_id uuid,
-      amount NUMERIC(15,2) NOT NULL,
-      currency VARCHAR(3) NOT NULL,
-      status VARCHAR(50) NOT NULL DEFAULT 'pending',
-      created_at TIMESTAMP DEFAULT NOW(),
-      FOREIGN KEY (requester_id) REFERENCES users(id) ON DELETE CASCADE
     );
     CREATE TABLE IF NOT EXISTS transactions (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -143,254 +127,116 @@ pool.connect((err) => {
       created_at TIMESTAMP DEFAULT NOW(),
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
-    DO $$
-    BEGIN
-        IF NOT EXISTS (
-            SELECT 1 FROM information_schema.columns
-            WHERE table_name = 'payments' AND column_name = 'target_email'
-        ) THEN
-            ALTER TABLE payments ADD COLUMN target_email VARCHAR(255);
-        END IF;
-        IF NOT EXISTS (
-            SELECT 1 FROM information_schema.columns
-            WHERE table_name = 'transactions' AND column_name = 'target_email'
-        ) THEN
-            ALTER TABLE transactions ADD COLUMN target_email VARCHAR(255);
-        END IF;
-    END $$;
   `, (err) => {
-    if (err) console.error('Error creating tables:', err);
-    else console.log('✅ Tables + TVC + notifications = READY!');
+    if (err) console.error('Table creation error:', err);
+    else console.log('Tables ready!');
   });
 });
 
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Missing or invalid Authorization header' });
-  }
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Unauthorized' });
   const token = authHeader.split(' ')[1];
   jwt.verify(token, process.env.JWT_SECRET, (err, claims) => {
-    if (err || !claims) {
-      return res.status(401).json({ error: 'Invalid token' });
-    }
+    if (err || !claims) return res.status(401).json({ error: 'Invalid token' });
     req.claims = claims;
     next();
   });
 };
 
-app.options('*', (req, res) => {
-  res.header('Access-Control-Allow-Origin', process.env.NODE_ENV === 'production' ? 'https://chatpay-frontend.onrender.com' : 'http://localhost:3000');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  res.status(200).end();
-});
-
-app.get('/health', (req, res) => {
-  res.json({ status: 'healthy' });
-});
-
-app.post('/signup', async (req, res) => {
-  const { email, password, name, surname } = req.body;
-  try {
-    const { rows } = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
-    if (rows.length > 0) {
-      return res.status(400).json({ error: 'Email already exists' });
-    }
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const userId = uuidv4();
-    await pool.query(
-      'INSERT INTO users (id, email, password, name, surname) VALUES ($1, $2, $3, $4, $5)',
-      [userId, email, hashedPassword, name, surname]
-    );
-    const token = jwt.sign({ user_id: userId }, process.env.JWT_SECRET, { expiresIn: '1h' });
-    res.json({ token });
-  } catch (err) {
-    res.status(500).json({ error: `Error creating user: ${err.message}` });
-  }
-});
-
-app.post('/login', async (req, res) => {
-  const { email, password } = req.body;
-  try {
-    const { rows } = await pool.query('SELECT id, password FROM users WHERE email = $1', [email]);
-    if (rows.length === 0) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-    const validPassword = await bcrypt.compare(password, rows[0].password);
-    if (!validPassword) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-    const token = jwt.sign({ user_id: rows[0].id }, process.env.JWT_SECRET, { expiresIn: '1h' });
-    res.json({ token, user_id: rows[0].id });
-  } catch (err) {
-    res.status(500).json({ error: 'Error generating token' });
-  }
-});
-
-app.get('/wallet/balance', authenticateToken, async (req, res) => {
-  try {
-    const { rows } = await pool.query('SELECT balance, currency FROM wallets WHERE user_id = $1 AND status = $2', [req.claims.user_id, 'active']);
-    res.json(rows.map(row => ({ balance: row.balance, currency: row.currency })));
-  } catch (err) {
-    res.status(500).json({ error: 'Error querying wallets' });
-  }
-});
-
-app.get('/payments/received', authenticateToken, async (req, res) => {
-  try {
-    const { rows } = await pool.query(
-      'SELECT payment_intent_id, amount, currency, status, created_at FROM payments WHERE receiver_id = $1 AND status = $2',
-      [req.claims.user_id, 'succeeded']
-    );
-    res.json(rows.map(row => ({
-      paymentIntentId: row.payment_intent_id,
-      amount: row.amount,
-      currency: row.currency,
-      status: row.status,
-      createdAt: row.created_at.toISOString(),
-    })));
-  } catch (err) {
-    res.status(500).json({ error: 'Error querying payments' });
-  }
-});
-
-app.post('/create-payment', authenticateToken, async (req, res) => {
-  return res.status(403).json({ error: 'Direct payments disabled. Use /generate-tvc for secure transfers.' });
-});
-
+// === TVC: DIRECT SEND (SENDER → RECEIVER) ===
 app.post('/generate-tvc', authenticateToken, async (req, res) => {
   const { amount, currency, target_email, note = '' } = req.body;
-  const requester_id = req.claims.user_id;
-
+  const sender_id = req.claims.user_id;
   try {
     const { rows: targetUser } = await pool.query('SELECT id FROM users WHERE email = $1', [target_email]);
     if (targetUser.length === 0) return res.status(404).json({ error: 'User not found' });
-
-    const { rows: requesterUser } = await pool.query('SELECT email FROM users WHERE id = $1', [requester_id]);
-    const requester_email = requesterUser[0]?.email || 'unknown';
-
-    const code = `CHAT-${Math.floor(100000 + Math.random() * 900000)}`;
-
-    await pool.query(`
-      INSERT INTO transactions (code, requester_id, amount, currency, note, status, target_email)
-      VALUES ($1, $2, $3, $4, $5, 'pending', $6)
-    `, [code, requester_id, amount, currency, note, target_email]);
-
-    // Store notification for User B
     const target_id = targetUser[0].id;
-    await pool.query(
-      'INSERT INTO notifications (user_id, message, created_at) VALUES ($1, $2, NOW())',
-      [target_id, `New Request: ₵${amount} ${currency} from ${requester_email} - Code: ${code}`]
-    );
-
-    // Notify User B via WebSocket
+    const sender_email = (await pool.query('SELECT email FROM users WHERE id = $1', [sender_id])).rows[0].email;
+    const code = `CHAT-${Math.floor(100000 + Math.random() * 900000)}`;
+    await pool.query(`
+      INSERT INTO transactions (code, requester_id, amount, currency, status, target_email, note)
+      VALUES ($1, $2, $3, $4, 'pending', $5, $6)
+    `, [code, sender_id, amount, currency, target_email, `Direct send from ${sender_email}`]);
+    const message = `You received ₵${amount} ${currency} from ${sender_email} - Code: ${code}`;
+    await pool.query('INSERT INTO notifications (user_id, message) VALUES ($1, $2)', [target_id, message]);
     const ws = clients.get(target_id);
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        event: 'tvc_generated',
-        code,
-        amount,
-        currency,
-        requester_email,
-        target_email,
-        message: `New Request: ₵${amount} ${currency} from ${requester_email} - Code: ${code}`
-      }));
+      ws.send(JSON.stringify({ event: 'tvc_received', code, amount, currency, from: sender_email, message }));
     }
-
-    res.json({ code, message: `Request sent! Code: ${code}` });
+    res.json({ code, message: `TVC sent to ${target_email}` });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post('/confirm-tvc', authenticateToken, async (req, res) => {
-  const { code } = req.body;
-  const sender_id = req.claims.user_id;
+// === TVC: REQUEST PAYMENT (REQUESTER → PAYER) ===
+app.post('/request-payment', authenticateToken, async (req, res) => {
+  const { amount, currency, target_email } = req.body;
+  const requester_id = req.claims.user_id;
+  try {
+    const { rows: targetUser } = await pool.query('SELECT id FROM users WHERE email = $1', [target_email]);
+    if (targetUser.length === 0) return res.status(404).json({ error: 'User not found' });
+    const target_id = targetUser[0].id;
+    const requester_email = (await pool.query('SELECT email FROM users WHERE id = $1', [requester_id])).rows[0].email;
+    const code = `CHAT-${Math.floor(100000 + Math.random() * 900000)}`;
+    await pool.query(`
+      INSERT INTO transactions (code, requester_id, amount, currency, status, target_email, note)
+      VALUES ($1, $2, $3, $4, 'pending', $5, $6)
+    `, [code, requester_id, amount, currency, target_email, `Request from ${requester_email}`]);
+    const message = `Payment request: ₵${amount} ${currency} from ${requester_email} - Code: ${code}`;
+    await pool.query('INSERT INTO notifications (user_id, message) VALUES ($1, $2)', [target_id, message]);
+    const ws = clients.get(target_id);
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ event: 'tvc_requested', code, amount, currency, from: requester_email, message }));
+    }
+    res.json({ success: true, message: `Request sent to ${target_email}` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
+// === TVC: CONFIRM WITH EMAIL OR PHONE ===
+app.post('/confirm-tvc', authenticateToken, async (req, res) => {
+  const { code, identifier } = req.body;
+  const user_id = req.claims.user_id;
   try {
     const { rows } = await pool.query(`
-      SELECT * FROM transactions 
-      WHERE code = $1 AND status = 'pending' AND expires_at > NOW()
+      SELECT t.*, u.email, u.phone FROM transactions t
+      JOIN users u ON t.requester_id = u.id
+      WHERE t.code = $1 AND t.status = 'pending' AND t.expires_at > NOW()
     `, [code]);
-
     if (rows.length === 0) return res.status(400).json({ error: 'Invalid or expired code' });
-
-    const { requester_id, amount, currency, target_email } = rows[0];
-
-    const { rows: senderWallet } = await pool.query(
-      'SELECT balance FROM wallets WHERE user_id = $1 AND currency = $2 AND status = $3',
-      [sender_id, currency, 'active']
-    );
-    if (senderWallet.length === 0 || senderWallet[0].balance < amount) {
-      return res.status(400).json({ error: 'Insufficient balance' });
+    const tx = rows[0];
+    const isEmailMatch = tx.target_email === identifier;
+    const isPhoneMatch = tx.phone === identifier;
+    if (!isEmailMatch && !isPhoneMatch) {
+      return res.status(403).json({ error: 'Email or phone does not match recipient' });
     }
-
-    await pool.query(
-      'UPDATE wallets SET balance = balance - $1 WHERE user_id = $2 AND currency = $3 AND status = $4',
-      [amount, sender_id, currency, 'active']
-    );
-    await pool.query(
-      'UPDATE wallets SET balance = balance + $1 WHERE user_id = $2 AND currency = $3 AND status = $4',
-      [amount, requester_id, currency, 'active']
-    );
-
-    await pool.query(
-      'UPDATE transactions SET sender_id = $1, status = $2 WHERE code = $3',
-      [sender_id, 'completed', code]
-    );
-
-    await pool.query(
-      'INSERT INTO payments (payment_intent_id, amount, currency, sender_id, receiver_id, status, method, created_at, target_email) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8)',
-      [uuidv4(), amount, currency, sender_id, requester_id, 'succeeded', 'tvc', target_email]
-    );
-
-    // Mark notification as read
-    await pool.query(
-      'UPDATE notifications SET is_read = TRUE WHERE user_id = $1 AND message LIKE $2',
-      [sender_id, `%Code: ${code}%`]
-    );
-
-    // Notify both users
-    [sender_id, requester_id].forEach(user_id => {
-      const ws = clients.get(user_id);
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({
-          event: 'tvc_completed',
-          code,
-          amount,
-          currency,
-          from: sender_id,
-          to: requester_id,
-          message: `✅ ₵${amount} ${currency} transferred!`
-        }));
-      }
-    });
-
-    res.json({ success: true, message: `✅ ₵${amount} sent! Ref: ${code}` });
+    await pool.query('UPDATE wallets SET balance = balance - $1 WHERE user_id = $2 AND currency = $3', [tx.amount, user_id, tx.currency]);
+    await pool.query('UPDATE wallets SET balance = balance + $1 WHERE user_id = $2 AND currency = $3', [tx.amount, tx.requester_id, tx.currency]);
+    await pool.query('UPDATE transactions SET status = $1, sender_id = $2 WHERE code = $3', ['completed', user_id, code]);
+    await pool.query('UPDATE notifications SET is_read = TRUE WHERE message LIKE $1', [`%${code}%`]);
+    res.json({ success: true, message: `₵${tx.amount} received!` });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
+// === NOTIFICATIONS ENDPOINT ===
 app.get('/notifications', authenticateToken, async (req, res) => {
   try {
     const { rows } = await pool.query(
-      'SELECT id, message, created_at, is_read FROM notifications WHERE user_id = $1 AND is_read = FALSE ORDER BY created_at DESC',
+      'SELECT id, message, created_at FROM notifications WHERE user_id = $1 AND is_read = FALSE ORDER BY created_at DESC',
       [req.claims.user_id]
     );
-    res.json(rows.map(row => ({
-      id: row.id,
-      message: row.message,
-      created_at: row.created_at.toISOString(),
-      is_read: row.is_read
-    })));
+    res.json(rows.map(r => ({ id: r.id, message: r.message, created_at: r.created_at.toISOString() })));
   } catch (err) {
-    console.error('Notifications error:', err);
-    res.status(500).json({ error: 'Error querying notifications' });
+    res.status(500).json({ error: 'Failed to fetch notifications' });
   }
 });
 
+// === MARK NOTIFICATION AS READ (NOW WITH CATCH!) ===
 app.post('/notifications/read', authenticateToken, async (req, res) => {
   try {
     const { notification_id } = req.body;
