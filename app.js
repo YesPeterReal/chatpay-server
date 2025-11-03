@@ -17,31 +17,55 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/ws' });
 
-// WebSocket clients map
-const clients = new Map();
+// STORE CONNECTIONS BY CONVERSATION
+const conversations = {}; // { convId: [ws1, ws2] }
 
 wss.on('connection', (ws, req) => {
   console.log('WebSocket client connected');
-  ws.on('message', (message) => {
+
+  // JOIN CONVERSATION
+  ws.on('message', (data) => {
     try {
-      const data = JSON.parse(message);
-      if (data.user_id) {
-        clients.set(data.user_id, ws);
-        console.log(`WebSocket registered for user_id: ${data.user_id}`);
+      const msg = JSON.parse(data);
+      if (msg.type === 'join') {
+        const convId = msg.conversation_id;
+        if (!conversations[convId]) {
+          conversations[convId] = [];
+        }
+        conversations[convId].push(ws);
+        console.log(`User joined conversation: ${convId}`);
       }
     } catch (err) {
-      console.error('WebSocket message error:', err);
+      console.error('Join error:', err);
     }
   });
-  ws.on('close', () => {
-    for (const [user_id, client] of clients.entries()) {
-      if (client === ws) {
-        clients.delete(user_id);
-        break;
+
+  // SEND MESSAGE TO CONVERSATION
+  ws.on('message', (data) => {
+    try {
+      const msg = JSON.parse(data);
+      const convId = msg.conversation_id;
+      
+      if (conversations[convId]) {
+        conversations[convId].forEach(client => {
+          if (client.readyState === WebSocket.OPEN && client !== ws) {
+            client.send(data); // ONLY TO OTHERS IN GROUP!
+          }
+        });
       }
+    } catch (err) {
+      console.error('Message error:', err);
     }
+  });
+
+  // CLEAN UP ON CLOSE
+  ws.on('close', () => {
+    Object.keys(conversations).forEach(convId => {
+      conversations[convId] = conversations[convId].filter(client => client !== ws);
+    });
   });
 });
+
 console.log('BUBBLES LIVE!');
 
 // CORS
@@ -51,7 +75,6 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
 }));
-
 app.use((req, res, next) => {
   if (req.originalUrl === '/webhook') next();
   else bodyParser.json()(req, res, next);
@@ -142,7 +165,7 @@ const authenticateToken = (req, res, next) => {
     req.claims = claims;
     next();
   });
-};
+});
 
 // === RESTORED: /signin (EXACTLY AS BEFORE) ===
 app.post('/signin', async (req, res) => {
@@ -535,7 +558,7 @@ app.post('/crypto-transfer', authenticateToken, async (req, res) => {
       [amount, user_id, currency, 'active']
     );
     await pool.query(
-      'INSERT INTO payments (payment_intent_id, amount, currency, sender_id, status, method, created_at, target_email) VALUES ($ Poem1, $2, $3, $4, $5, $6, $7, $8)',
+      'INSERT INTO payments (payment_intent_id, amount, currency, sender_id, status, method, created_at, target_email) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
       [txHash, amount, currency, user_id, 'succeeded', 'crypto', new Date(), to_address]
     );
     wss.clients.forEach(client => {
