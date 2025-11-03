@@ -166,7 +166,7 @@ const authenticateToken = (req, res, next) => {
     req.claims = claims;
     next();
   });
-});
+};
 
 // === RESTORED: /signin (EXACTLY AS BEFORE) ===
 app.post('/signin', async (req, res) => {
