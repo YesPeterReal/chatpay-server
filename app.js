@@ -1,4 +1,4 @@
-// server/app.js
+// server/app.js — FULL UPDATED CODE (CORS + MISSING ROUTES + CLIENTS MAP)
 console.log('TVC FLOW LIVE!');
 // Force commit for Render deployment
 if (process.env.NODE_ENV !== 'production') {
@@ -18,11 +18,25 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/ws' });
 
+// WebSocket clients map
+const clients = new Map(); // user_id → ws
+
 // STORE CONNECTIONS BY CONVERSATION
 const conversations = {}; // { convId: [ws1, ws2] }
 
 wss.on('connection', (ws, req) => {
   console.log('WebSocket client connected');
+
+  // Register user_id
+  ws.on('message', (data) => {
+    try {
+      const msg = JSON.parse(data);
+      if (msg.user_id) {
+        clients.set(msg.user_id, ws);
+        console.log(`WebSocket registered for user_id: ${msg.user_id}`);
+      }
+    } catch (err) {}
+  });
 
   // JOIN CONVERSATION
   ws.on('message', (data) => {
@@ -61,6 +75,14 @@ wss.on('connection', (ws, req) => {
 
   // CLEAN UP ON CLOSE
   ws.on('close', () => {
+    // Remove from clients
+    for (const [user_id, client] of clients.entries()) {
+      if (client === ws) {
+        clients.delete(user_id);
+        break;
+      }
+    }
+    // Remove from conversations
     Object.keys(conversations).forEach(convId => {
       conversations[convId] = conversations[convId].filter(client => client !== ws);
     });
@@ -69,7 +91,7 @@ wss.on('connection', (ws, req) => {
 
 console.log('BUBBLES LIVE!');
 
-// CORS — FIXED FOR LOCAL TESTING!
+// CORS — FIXED FOR LOCAL + PRODUCTION
 app.use(cors({
   origin: (origin, callback) => {
     const allowedOrigins = [
@@ -179,6 +201,19 @@ const authenticateToken = (req, res, next) => {
     next();
   });
 };
+
+// === WALLET BALANCE ===
+app.get('/wallet/balance', authenticateToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT currency, balance FROM wallets WHERE user_id = $1 AND status = $2',
+      [req.claims.user_id, 'active']
+    );
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // === RESTORED: /signin (EXACTLY AS BEFORE) ===
 app.post('/signin', async (req, res) => {
