@@ -69,13 +69,25 @@ wss.on('connection', (ws, req) => {
 
 console.log('BUBBLES LIVE!');
 
-// CORS
+// CORS — FIXED FOR LOCAL TESTING!
 app.use(cors({
-  origin: process.env.NODE_ENV === 'production' ? 'https://chatpay-frontend.onrender.com' : 'http://localhost:3000',
+  origin: (origin, callback) => {
+    const allowedOrigins = [
+      'https://chatpay-frontend.onrender.com',
+      'http://localhost:3000',
+      'http://127.0.0.1:3000'
+    ];
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
 }));
+
 app.use((req, res, next) => {
   if (req.originalUrl === '/webhook') next();
   else bodyParser.json()(req, res, next);
