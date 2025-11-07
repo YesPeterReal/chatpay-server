@@ -1,7 +1,6 @@
-// server/app.js — FULLY FIXED & DEPLOYABLE
+// server/app.js — FINAL VERSION
 console.log('TVC FLOW LIVE!');
 
-// Load env in dev
 if (process.env.NODE_ENV !== 'production') {
   require('dotenv').config();
 }
@@ -25,38 +24,18 @@ const wss = new WebSocket.Server({ server, path: '/ws' });
 const clients = new Map(); // user_id → ws
 const conversations = {}; // { convId: [ws1, ws2] }
 
-wss.on('connection', (ws, req) => {
-  console.log('WebSocket client connected');
+wss.on('connection', (ws) => {
+  console.log('WebSocket connected');
 
   ws.on('message', (data) => {
     try {
       const msg = JSON.parse(data);
-      if (msg.user_id) {
-        clients.set(msg.user_id, ws);
-        console.log(`WebSocket registered for user_id: ${msg.user_id}`);
-      }
-    } catch (err) {}
-  });
-
-  ws.on('message', (data) => {
-    try {
-      const msg = JSON.parse(data);
+      if (msg.user_id) clients.set(msg.user_id, ws);
       if (msg.type === 'join') {
         const convId = msg.conversation_id;
-        if (!conversations[convId]) {
-          conversations[convId] = [];
-        }
+        if (!conversations[convId]) conversations[convId] = [];
         conversations[convId].push(ws);
-        console.log(`User joined conversation: ${convId}`);
       }
-    } catch (err) {
-      console.error('Join error:', err);
-    }
-  });
-
-  ws.on('message', (data) => {
-    try {
-      const msg = JSON.parse(data);
       const convId = msg.conversation_id;
       if (conversations[convId]) {
         conversations[convId].forEach(client => {
@@ -65,17 +44,12 @@ wss.on('connection', (ws, req) => {
           }
         });
       }
-    } catch (err) {
-      console.error('Message error:', err);
-    }
+    } catch (err) {}
   });
 
   ws.on('close', () => {
     for (const [user_id, client] of clients.entries()) {
-      if (client === ws) {
-        clients.delete(user_id);
-        break;
-      }
+      if (client === ws) clients.delete(user_id);
     }
     Object.keys(conversations).forEach(convId => {
       conversations[convId] = conversations[convId].filter(client => client !== ws);
@@ -88,19 +62,10 @@ console.log('BUBBLES LIVE!');
 // CORS
 app.use(cors({
   origin: (origin, callback) => {
-    const allowedOrigins = [
-      'https://chatpay-frontend.onrender.com',
-      'http://localhost:3000',
-      'http://127.0.0.1:3000'
-    ];
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
+    const allowed = ['https://chatpay-frontend.onrender.com', 'http://localhost:3000'];
+    if (!origin || allowed.includes(origin)) callback(null, true);
+    else callback(new Error('CORS'));
   },
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
 }));
 
@@ -114,9 +79,6 @@ app.use('/webhook', bodyParser.raw({ type: 'application/json' }));
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL || 'postgresql://localhost:5432/chatpay_db',
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-  connectionTimeoutMillis: 5000,
-  max: 10,
-  idleTimeoutMillis: 30000,
 });
 
 pool.connect((err) => {
@@ -126,6 +88,8 @@ pool.connect((err) => {
   }
   console.log('DB connected!');
   pool.query(`
+    CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
     CREATE TABLE IF NOT EXISTS users (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       email VARCHAR(255) UNIQUE NOT NULL,
@@ -136,6 +100,7 @@ pool.connect((err) => {
       gender VARCHAR(50),
       dob DATE
     );
+
     CREATE TABLE IF NOT EXISTS wallets (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       user_id uuid NOT NULL,
@@ -146,6 +111,7 @@ pool.connect((err) => {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
       CONSTRAINT wallets_user_id_currency_key UNIQUE (user_id, currency)
     );
+
     CREATE TABLE IF NOT EXISTS payments (
       payment_intent_id VARCHAR(255) PRIMARY KEY,
       amount NUMERIC(15,2) NOT NULL,
@@ -157,6 +123,7 @@ pool.connect((err) => {
       created_at TIMESTAMP DEFAULT NOW(),
       target_email VARCHAR(255)
     );
+
     CREATE TABLE IF NOT EXISTS transactions (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       code VARCHAR(20) UNIQUE NOT NULL,
@@ -172,6 +139,7 @@ pool.connect((err) => {
       FOREIGN KEY (requester_id) REFERENCES users(id),
       FOREIGN KEY (sender_id) REFERENCES users(id)
     );
+
     CREATE TABLE IF NOT EXISTS notifications (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       user_id uuid NOT NULL,
@@ -181,7 +149,7 @@ pool.connect((err) => {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
   `, (err) => {
-    if (err) console.error('Table creation error:', err);
+    if (err) console.error('Table error:', err);
     else console.log('Tables ready!');
   });
 });
@@ -198,7 +166,7 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// === /signup ===
+// === /signup — 200 OK! ===
 app.post('/signup', async (req, res) => {
   const { name, surname, email, password, gender, phone, dob } = req.body;
   try {
@@ -230,25 +198,18 @@ app.post('/signup', async (req, res) => {
 app.post('/signin', async (req, res) => {
   const { email, password } = req.body;
   try {
-    if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
+    if (!email || !password) return res.status(400).json({ error: 'Required' });
     const { rows } = await pool.query('SELECT id, password FROM users WHERE email = $1', [email]);
     if (rows.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
 
-    const validPassword = await bcrypt.compare(password, rows[0].password);
-    if (!validPassword) return res.status(401).json({ error: 'Invalid credentials' });
+    const valid = await bcrypt.compare(password, rows[0].password);
+    if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
 
-    const userId = rows[0].id;
-    const token = jwt.sign({ user_id: userId }, process.env.JWT_SECRET || 'fallback_secret', { expiresIn: '1h' });
-
-    const { rows: walletRows } = await pool.query('SELECT id FROM wallets WHERE user_id = $1 AND currency = $2', [userId, 'EUR']);
-    if (walletRows.length === 0) {
-      await pool.query('INSERT INTO wallets (user_id, balance, currency, status) VALUES ($1, 0, $2, $3)', [userId, 'EUR', 'active']);
-    }
-
-    res.json({ message: 'Signin successful', token, user_id: userId });
+    const token = jwt.sign({ user_id: rows[0].id }, process.env.JWT_SECRET || 'fallback_secret', { expiresIn: '1h' });
+    res.json({ message: 'Signed in', token, user_id: rows[0].id });
   } catch (err) {
-    console.error('Signin error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
@@ -320,7 +281,7 @@ app.post('/confirm-tvc', authenticateToken, async (req, res) => {
   const user_id = req.claims.user_id;
   try {
     const { rows } = await pool.query(`
-      SELECT t.*, u.email, u.phone 
+      SELECT t.*, u.email, u.phone
       FROM transactions t
       JOIN users u ON t.requester_id = u.id
       WHERE t.code = $1 AND t.status = 'pending' AND t.expires_at > NOW()
