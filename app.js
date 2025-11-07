@@ -8,8 +8,10 @@ if (process.env.NODE_ENV !== 'production') {
 const express = require('express');
 const { Pool } = require('pg');
 const jwt = require('jsonwebtoken');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY || '');
 const bodyParser = require('body-parser');
 const cors = require('cors');
+const { v4: uuidv4 } = require('uuid');
 const bcrypt = require('bcrypt');
 const http = require('http');
 const WebSocket = require('ws');
@@ -18,11 +20,13 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/ws' });
 
-// WebSocket
-const clients = new Map();
-const conversations = {};
+// WebSocket clients map
+const clients = new Map(); // user_id → ws
+const conversations = {}; // { convId: [ws1, ws2] }
 
 wss.on('connection', (ws) => {
+  console.log('WebSocket connected');
+
   ws.on('message', (data) => {
     try {
       const msg = JSON.parse(data);
@@ -53,12 +57,13 @@ wss.on('connection', (ws) => {
   });
 });
 
+console.log('BUBBLES LIVE!');
+
+// CORS
 app.use(cors({
-  origin: (origin, callback) => {
-    const allowed = ['https://chatpay-frontend.onrender.com', 'http://localhost:3000'];
-    if (!origin || allowed.includes(origin)) callback(null, true);
-    else callback(new Error('CORS'));
-  },
+  origin: process.env.NODE_ENV === 'production' ? 'https://chatpay-frontend.onrender.com' : 'http://localhost:3000',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
 }));
 
@@ -76,48 +81,78 @@ const pool = new Pool({
 
 pool.connect((err) => {
   if (err) {
-    console.error('DB connection error:', err);
+    console.error('DB error:', err);
     process.exit(1);
   }
   console.log('DB connected!');
 
-  // ENABLE UUID EXTENSION
-  pool.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"', (err) => {
-    if (err) {
-      console.error('Failed to enable uuid-ossp:', err.message);
-    } else {
-      console.log('uuid-ossp extension enabled!');
-    }
+  pool.query(`
+    -- USERS: NO DEFAULT UUID
+    CREATE TABLE IF NOT EXISTS users (
+      id uuid PRIMARY KEY,
+      email VARCHAR(255) UNIQUE NOT NULL,
+      password TEXT NOT NULL,
+      name VARCHAR(255) NOT NULL,
+      surname VARCHAR(255) NOT NULL,
+      phone VARCHAR(20),
+      gender VARCHAR(50),
+      dob DATE
+    );
 
-    // CREATE TABLES
-    pool.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        email VARCHAR(255) UNIQUE NOT NULL,
-        password TEXT NOT NULL,
-        name VARCHAR(255) NOT NULL,
-        surname VARCHAR(255) NOT NULL,
-        phone VARCHAR(20),
-        gender VARCHAR(50),
-        dob DATE
-      );
+    -- WALLETS: NO DEFAULT UUID
+    CREATE TABLE IF NOT EXISTS wallets (
+      id uuid PRIMARY KEY,
+      user_id uuid NOT NULL,
+      balance NUMERIC(15,2) DEFAULT 0,
+      currency VARCHAR(3) NOT NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'active',
+      created_at TIMESTAMP DEFAULT NOW(),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      CONSTRAINT wallets_user_id_currency_key UNIQUE (user_id, currency)
+    );
 
-      CREATE TABLE IF NOT EXISTS wallets (
-        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        user_id uuid NOT NULL,
-        balance NUMERIC(15,2) DEFAULT 0,
-        currency VARCHAR(3) NOT NULL,
-        status VARCHAR(20) NOT NULL DEFAULT 'active',
-        created_at TIMESTAMP DEFAULT NOW(),
-        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-        CONSTRAINT wallets_user_id_currency_key UNIQUE (user_id, currency)
-      );
+    -- PAYMENTS
+    CREATE TABLE IF NOT EXISTS payments (
+      payment_intent_id VARCHAR(255) PRIMARY KEY,
+      amount NUMERIC(15,2) NOT NULL,
+      currency VARCHAR(3) NOT NULL,
+      sender_id uuid,
+      receiver_id uuid,
+      status VARCHAR(50) NOT NULL DEFAULT 'succeeded',
+      method VARCHAR(50) NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW(),
+      target_email VARCHAR(255)
+    );
 
-      -- [other tables: payments, transactions, notifications]
-    `, (err) => {
-      if (err) console.error('Table creation error:', err);
-      else console.log('Tables ready!');
-    });
+    -- TRANSACTIONS
+    CREATE TABLE IF NOT EXISTS transactions (
+      id uuid PRIMARY KEY,
+      code VARCHAR(20) UNIQUE NOT NULL,
+      requester_id uuid NOT NULL,
+      sender_id uuid,
+      amount NUMERIC(15,2) NOT NULL,
+      currency VARCHAR(3) NOT NULL,
+      status VARCHAR(20) DEFAULT 'pending',
+      note TEXT,
+      target_email VARCHAR(255),
+      expires_at TIMESTAMP DEFAULT NOW() + INTERVAL '10 minutes',
+      created_at TIMESTAMP DEFAULT NOW(),
+      FOREIGN KEY (requester_id) REFERENCES users(id),
+      FOREIGN KEY (sender_id) REFERENCES users(id)
+    );
+
+    -- NOTIFICATIONS
+    CREATE TABLE IF NOT EXISTS notifications (
+      id uuid PRIMARY KEY,
+      user_id uuid NOT NULL,
+      message TEXT NOT NULL,
+      is_read BOOLEAN DEFAULT FALSE,
+      created_at TIMESTAMP DEFAULT NOW(),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+  `, (err) => {
+    if (err) console.error('Table error:', err);
+    else console.log('Tables ready!');
   });
 });
 
@@ -133,7 +168,7 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// === /signup — 200 OK FOREVER! ===
+// === /signup — FIXED WITH uuidv4()! ===
 app.post('/signup', async (req, res) => {
   const { name, surname, email, password, gender, phone, dob } = req.body;
   try {
@@ -142,22 +177,24 @@ app.post('/signup', async (req, res) => {
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
+    const userId = uuidv4(); // ← NODE GENERATES ID!
 
     const { rows } = await pool.query(
-      'INSERT INTO users (email, password, name, surname, gender, phone, dob) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
-      [email, hashedPassword, name, surname, gender, phone, dob]
+      'INSERT INTO users (id, email, password, name, surname, gender, phone, dob) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id',
+      [userId, email, hashedPassword, name, surname, gender, phone, dob]
     );
 
+    const walletId = uuidv4();
     await pool.query(
-      'INSERT INTO wallets (user_id, balance, currency, status) VALUES ($1, 0, $2, $3)',
-      [rows[0].id, 'EUR', 'active']
+      'INSERT INTO wallets (id, user_id, balance, currency, status) VALUES ($1, $2, 0, $3, $4)',
+      [walletId, userId, 'EUR', 'active']
     );
 
-    res.json({ message: 'Signup successful!', user_id: rows[0].id });
+    res.json({ message: 'Signup successful!', user_id: userId });
   } catch (err) {
     console.error('Signup error:', err);
     if (err.code === '23505') return res.status(400).json({ error: 'Email already exists' });
-    res.status(500).json({ error: 'Signup failed: ' + err.message });
+    res.status(500).json({ error: 'Signup failed' });
   }
 });
 
@@ -175,7 +212,7 @@ app.post('/signin', async (req, res) => {
     const token = jwt.sign({ user_id: rows[0].id }, process.env.JWT_SECRET || 'fallback_secret', { expiresIn: '1h' });
     res.json({ message: 'Signed in', token, user_id: rows[0].id });
   } catch (err) {
-    console.error('Signin error:', err);
+    console.error(err);
     res.status(500).json({ error: 'Server error' });
   }
 });
