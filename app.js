@@ -215,6 +215,36 @@ app.get('/wallet/balance', authenticateToken, async (req, res) => {
   }
 });
 
+// === /signup ENDPOINT — NOW LIVE! ===
+app.post('/signup', async (req, res) => {
+  const { name, surname, email, password, gender, phone, dob } = req.body;
+  try {
+    if (!email || !password || !name || !surname) {
+      return res.status(400).json({ error: 'Required fields missing' });
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Insert user
+    const { rows } = await pool.query(
+      'INSERT INTO users (id, email, password, name, surname, gender, phone, dob) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7) RETURNING id',
+      [email, hashedPassword, name, surname, gender, phone, dob]
+    );
+
+    // Create wallet
+    await pool.query(
+      'INSERT INTO wallets (id, user_id, balance, currency, status) VALUES (gen_random_uuid(), $1, 0, $2, $3)',
+      [rows[0].id, 'EUR', 'active']
+    );
+
+    res.json({ message: 'Signup successful!', user_id: rows[0].id });
+  } catch (err) {
+    console.error('❌ /signup error:', err);
+    res.status(500).json({ error: 'Signup failed' });
+  }
+});
+
 // === RESTORED: /signin (EXACTLY AS BEFORE) ===
 app.post('/signin', async (req, res) => {
   const { email, password } = req.body;
