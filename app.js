@@ -1,9 +1,11 @@
-// server/app.js — FULL UPDATED CODE (CORS + MISSING ROUTES + CLIENTS MAP)
+// server/app.js — FULLY FIXED & CLEAN
 console.log('TVC FLOW LIVE!');
-// Force commit for Render deployment
+
+// Load env in dev
 if (process.env.NODE_ENV !== 'production') {
   require('dotenv').config();
 }
+
 const express = require('express');
 const { Pool } = require('pg');
 const jwt = require('jsonwebtoken');
@@ -14,14 +16,13 @@ const { v4: uuidv4 } = require('uuid');
 const bcrypt = require('bcrypt');
 const http = require('http');
 const WebSocket = require('ws');
+
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/ws' });
 
 // WebSocket clients map
 const clients = new Map(); // user_id → ws
-
-// STORE CONNECTIONS BY CONVERSATION
 const conversations = {}; // { convId: [ws1, ws2] }
 
 wss.on('connection', (ws, req) => {
@@ -60,11 +61,10 @@ wss.on('connection', (ws, req) => {
     try {
       const msg = JSON.parse(data);
       const convId = msg.conversation_id;
-      
       if (conversations[convId]) {
         conversations[convId].forEach(client => {
           if (client.readyState === WebSocket.OPEN && client !== ws) {
-            client.send(data); // ONLY TO OTHERS IN GROUP!
+            client.send(data);
           }
         });
       }
@@ -75,14 +75,12 @@ wss.on('connection', (ws, req) => {
 
   // CLEAN UP ON CLOSE
   ws.on('close', () => {
-    // Remove from clients
     for (const [user_id, client] of clients.entries()) {
       if (client === ws) {
         clients.delete(user_id);
         break;
       }
     }
-    // Remove from conversations
     Object.keys(conversations).forEach(convId => {
       conversations[convId] = conversations[convId].filter(client => client !== ws);
     });
@@ -91,7 +89,7 @@ wss.on('connection', (ws, req) => {
 
 console.log('BUBBLES LIVE!');
 
-// CORS — FIXED FOR LOCAL + PRODUCTION
+// CORS — LOCAL + PRODUCTION
 app.use(cors({
   origin: (origin, callback) => {
     const allowedOrigins = [
@@ -116,13 +114,14 @@ app.use((req, res, next) => {
 });
 app.use('/webhook', bodyParser.raw({ type: 'application/json' }));
 
+// DATABASE
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL || 'postgresql://localhost:5432/chatpay_db',
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : { rejectUnauthorized: false },
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
   connectionTimeoutMillis: 5000,
   max: 10,
   idleTimeoutMillis: 30000,
-});
+}));
 
 pool.connect((err) => {
   if (err) {
@@ -132,7 +131,7 @@ pool.connect((err) => {
   console.log('DB connected!');
   pool.query(`
     CREATE TABLE IF NOT EXISTS users (
-      id uuid PRIMARY KEY,
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       email VARCHAR(255) UNIQUE NOT NULL,
       password TEXT NOT NULL,
       name VARCHAR(255) NOT NULL,
@@ -191,31 +190,19 @@ pool.connect((err) => {
   });
 });
 
+// AUTH MIDDLEWARE
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Unauthorized' });
   const token = authHeader.split(' ')[1];
-  jwt.verify(token, process.env.JWT_SECRET, (err, claims) => {
+  jwt.verify(token, process.env.JWT_SECRET || 'fallback_secret', (err, claims) => {
     if (err || !claims) return res.status(401).json({ error: 'Invalid token' });
     req.claims = claims;
     next();
   });
 };
 
-// === WALLET BALANCE ===
-app.get('/wallet/balance', authenticateToken, async (req, res) => {
-  try {
-    const { rows } = await pool.query(
-      'SELECT currency, balance FROM wallets WHERE user_id = $1 AND status = $2',
-      [req.claims.user_id, 'active']
-    );
-    res.json(rows);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// === /signup ENDPOINT — NOW LIVE! ===
+// === /signup — FIXED! ===
 app.post('/signup', async (req, res) => {
   const { name, surname, email, password, gender, phone, dob } = req.body;
   try {
@@ -223,74 +210,62 @@ app.post('/signup', async (req, res) => {
       return res.status(400).json({ error: 'Required fields missing' });
     }
 
-    // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Insert user
     const { rows } = await pool.query(
-      'INSERT INTO users (id, email, password, name, surname, gender, phone, dob) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7) RETURNING id',
+      'INSERT INTO users (email, password, name, surname, gender, phone, dob) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
       [email, hashedPassword, name, surname, gender, phone, dob]
     );
 
-    // Create wallet
     await pool.query(
-      'INSERT INTO wallets (id, user_id, balance, currency, status) VALUES (gen_random_uuid(), $1, 0, $2, $3)',
+      'INSERT INTO wallets (user_id, balance, currency, status) VALUES ($1, 0, $2, $3)',
       [rows[0].id, 'EUR', 'active']
     );
 
     res.json({ message: 'Signup successful!', user_id: rows[0].id });
   } catch (err) {
-    console.error('❌ /signup error:', err);
+    console.error('Signup error:', err);
     res.status(500).json({ error: 'Signup failed' });
   }
 });
 
-// === RESTORED: /signin (EXACTLY AS BEFORE) ===
+// === /signin ===
 app.post('/signin', async (req, res) => {
   const { email, password } = req.body;
   try {
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password are required' });
     }
-    const { rows } = await pool.query(
-      'SELECT id, password FROM users WHERE email = $1',
-      [email]
-    );
-    if (rows.length === 0) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
+    const { rows } = await pool.query('SELECT id, password FROM users WHERE email = $1', [email]);
+    if (rows.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
+
     const validPassword = await bcrypt.compare(password, rows[0].password);
-    if (!validPassword) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
+    if (!validPassword) return res.status(401).json({ error: 'Invalid credentials' });
+
     const userId = rows[0].id;
-    const token = jwt.sign(
-      { user_id: userId },
-      process.env.JWT_SECRET || 'secret',
-      { expiresIn: '1h' }
-    );
-    const { rows: walletRows } = await pool.query(
-      'SELECT id FROM wallets WHERE user_id = $1 AND currency = $2',
-      [userId, 'EUR']
-    );
+    const token = jwt.sign({ user_id: userId }, process.env.JWT_SECRET || 'fallback_secret', { expiresIn: '1h' });
+
+    const { rows: walletRows } = await pool.query('SELECT id FROM wallets WHERE user_id = $1 AND currency = $2', [userId, 'EUR']);
     if (walletRows.length === 0) {
-      await pool.query(
-        `INSERT INTO wallets (id, user_id, balance, currency, status)
-         VALUES (gen_random_uuid(), $1, 0, $2, $3)`,
-        [userId, 'EUR', 'active']
-      );
+      await pool.query('INSERT INTO wallets (user_id, balance, currency, status) VALUES ($1, 0, $2, $3)', [userId, 'EUR', 'active']);
     }
-    res.json({
-      message: 'Signin successful',
-      token,
-      user_id: userId,
-    });
+
+    res.json({ message: 'Signin successful', token, user_id: userId });
   } catch (err) {
-    console.error('❌ /signin error:', err);
+    console.error('Signin error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
+// === WALLET BALANCE ===
+app.get('/wallet/balance', authenticateToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT currency, balance FROM wallets WHERE user_id = $1 AND status = $2', [req.claims.user_id, 'active']);
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 // === TVC: DIRECT SEND (SENDER → RECEIVER) ===
 app.post('/generate-tvc', authenticateToken, async (req, res) => {
   const { amount, currency, target_email, note = '' } = req.body;
