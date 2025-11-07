@@ -87,8 +87,12 @@ pool.connect((err) => {
     process.exit(1);
   }
   console.log('DB connected!');
-  pool.query(`
-    CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+  pool.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"', (err) => {
+    if (err) {
+      console.error('Failed to enable uuid-ossp:', err.message);
+    } else {
+      console.log('uuid-ossp extension enabled!');
+    }
 
     CREATE TABLE IF NOT EXISTS users (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
