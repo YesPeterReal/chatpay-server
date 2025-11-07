@@ -1,4 +1,4 @@
-// server/app.js — FULLY FIXED & CLEAN
+// server/app.js — FULLY FIXED & DEPLOYABLE
 console.log('TVC FLOW LIVE!');
 
 // Load env in dev
@@ -28,7 +28,6 @@ const conversations = {}; // { convId: [ws1, ws2] }
 wss.on('connection', (ws, req) => {
   console.log('WebSocket client connected');
 
-  // Register user_id
   ws.on('message', (data) => {
     try {
       const msg = JSON.parse(data);
@@ -39,7 +38,6 @@ wss.on('connection', (ws, req) => {
     } catch (err) {}
   });
 
-  // JOIN CONVERSATION
   ws.on('message', (data) => {
     try {
       const msg = JSON.parse(data);
@@ -56,7 +54,6 @@ wss.on('connection', (ws, req) => {
     }
   });
 
-  // SEND MESSAGE TO CONVERSATION
   ws.on('message', (data) => {
     try {
       const msg = JSON.parse(data);
@@ -73,7 +70,6 @@ wss.on('connection', (ws, req) => {
     }
   });
 
-  // CLEAN UP ON CLOSE
   ws.on('close', () => {
     for (const [user_id, client] of clients.entries()) {
       if (client === ws) {
@@ -89,7 +85,7 @@ wss.on('connection', (ws, req) => {
 
 console.log('BUBBLES LIVE!');
 
-// CORS — LOCAL + PRODUCTION
+// CORS
 app.use(cors({
   origin: (origin, callback) => {
     const allowedOrigins = [
@@ -121,7 +117,7 @@ const pool = new Pool({
   connectionTimeoutMillis: 5000,
   max: 10,
   idleTimeoutMillis: 30000,
-}));
+});
 
 pool.connect((err) => {
   if (err) {
@@ -190,7 +186,7 @@ pool.connect((err) => {
   });
 });
 
-// AUTH MIDDLEWARE
+// AUTH
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Unauthorized' });
@@ -202,7 +198,7 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// === /signup — FIXED! ===
+// === /signup ===
 app.post('/signup', async (req, res) => {
   const { name, surname, email, password, gender, phone, dob } = req.body;
   try {
@@ -225,6 +221,7 @@ app.post('/signup', async (req, res) => {
     res.json({ message: 'Signup successful!', user_id: rows[0].id });
   } catch (err) {
     console.error('Signup error:', err);
+    if (err.code === '23505') return res.status(400).json({ error: 'Email already exists' });
     res.status(500).json({ error: 'Signup failed' });
   }
 });
@@ -233,9 +230,7 @@ app.post('/signup', async (req, res) => {
 app.post('/signin', async (req, res) => {
   const { email, password } = req.body;
   try {
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password are required' });
-    }
+    if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
     const { rows } = await pool.query('SELECT id, password FROM users WHERE email = $1', [email]);
     if (rows.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
 
@@ -266,7 +261,8 @@ app.get('/wallet/balance', authenticateToken, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-// === TVC: DIRECT SEND (SENDER → RECEIVER) ===
+
+// === TVC: DIRECT SEND ===
 app.post('/generate-tvc', authenticateToken, async (req, res) => {
   const { amount, currency, target_email, note = '' } = req.body;
   const sender_id = req.claims.user_id;
@@ -280,7 +276,7 @@ app.post('/generate-tvc', authenticateToken, async (req, res) => {
       INSERT INTO transactions (code, requester_id, amount, currency, status, target_email, note)
       VALUES ($1, $2, $3, $4, 'pending', $5, $6)
     `, [code, sender_id, amount, currency, target_email, `Direct send from ${sender_email}`]);
-    const message = `You received ₵${amount} ${currency} from ${sender_email} - Code: ${code}`;
+    const message = `You received €${amount} ${currency} from ${sender_email} - Code: ${code}`;
     await pool.query('INSERT INTO notifications (user_id, message) VALUES ($1, $2)', [target_id, message]);
     const ws = clients.get(target_id);
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -292,7 +288,7 @@ app.post('/generate-tvc', authenticateToken, async (req, res) => {
   }
 });
 
-// === TVC: REQUEST PAYMENT (REQUESTER → PAYER) ===
+// === TVC: REQUEST PAYMENT ===
 app.post('/request-payment', authenticateToken, async (req, res) => {
   const { amount, currency, target_email } = req.body;
   const requester_id = req.claims.user_id;
@@ -306,7 +302,7 @@ app.post('/request-payment', authenticateToken, async (req, res) => {
       INSERT INTO transactions (code, requester_id, amount, currency, status, target_email, note)
       VALUES ($1, $2, $3, $4, 'pending', $5, $6)
     `, [code, requester_id, amount, currency, target_email, `Request from ${requester_email}`]);
-    const message = `Payment request: ₵${amount} ${currency} from ${requester_email} - Code: ${code}`;
+    const message = `Payment request: €${amount} ${currency} from ${requester_email} - Code: ${code}`;
     await pool.query('INSERT INTO notifications (user_id, message) VALUES ($1, $2)', [target_id, message]);
     const ws = clients.get(target_id);
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -318,13 +314,14 @@ app.post('/request-payment', authenticateToken, async (req, res) => {
   }
 });
 
-// === TVC: CONFIRM WITH EMAIL OR PHONE ===
+// === TVC: CONFIRM ===
 app.post('/confirm-tvc', authenticateToken, async (req, res) => {
   const { code, identifier } = req.body;
   const user_id = req.claims.user_id;
   try {
     const { rows } = await pool.query(`
-      SELECT t.*, u.email, u.phone FROM transactions t
+      SELECT t.*, u.email, u.phone 
+      FROM transactions t
       JOIN users u ON t.requester_id = u.id
       WHERE t.code = $1 AND t.status = 'pending' AND t.expires_at > NOW()
     `, [code]);
@@ -339,13 +336,13 @@ app.post('/confirm-tvc', authenticateToken, async (req, res) => {
     await pool.query('UPDATE wallets SET balance = balance + $1 WHERE user_id = $2 AND currency = $3', [tx.amount, tx.requester_id, tx.currency]);
     await pool.query('UPDATE transactions SET status = $1, sender_id = $2 WHERE code = $3', ['completed', user_id, code]);
     await pool.query('UPDATE notifications SET is_read = TRUE WHERE message LIKE $1', [`%${code}%`]);
-    res.json({ success: true, message: `₵${tx.amount} received!` });
+    res.json({ success: true, message: `€${tx.amount} received!` });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// === NOTIFICATIONS ENDPOINT ===
+// === NOTIFICATIONS ===
 app.get('/notifications', authenticateToken, async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -358,14 +355,10 @@ app.get('/notifications', authenticateToken, async (req, res) => {
   }
 });
 
-// === MARK NOTIFICATION AS READ (NOW WITH CATCH!) ===
 app.post('/notifications/read', authenticateToken, async (req, res) => {
   try {
     const { notification_id } = req.body;
-    await pool.query(
-      'UPDATE notifications SET is_read = TRUE WHERE id = $1 AND user_id = $2',
-      [notification_id, req.claims.user_id]
-    );
+    await pool.query('UPDATE notifications SET is_read = TRUE WHERE id = $1 AND user_id = $2', [notification_id, req.claims.user_id]);
     res.json({ success: true });
   } catch (err) {
     console.error('Mark notification read error:', err);
@@ -373,6 +366,7 @@ app.post('/notifications/read', authenticateToken, async (req, res) => {
   }
 });
 
+// === PENDING TVC ===
 app.get('/pending-tvc', authenticateToken, async (req, res) => {
   try {
     const { rows } = await pool.query(`
@@ -397,6 +391,7 @@ app.get('/pending-tvc', authenticateToken, async (req, res) => {
   }
 });
 
+// === WEBHOOK ===
 app.post('/webhook', async (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
@@ -407,6 +402,7 @@ app.post('/webhook', async (req, res) => {
     console.log('Webhook error:', err.message);
     return res.status(400).json({ error: `Webhook Error: ${err.message}` });
   }
+
   if (event.type === 'payment_intent.succeeded' || event.type === 'payment_intent.payment_failed') {
     const pi = event.data.object;
     const status = event.type === 'payment_intent.succeeded' ? 'succeeded' : 'failed';
@@ -433,6 +429,7 @@ app.post('/webhook', async (req, res) => {
   res.json({ status: 'received' });
 });
 
+// === LIST PAYMENTS ===
 app.get('/list-payments', authenticateToken, async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -456,6 +453,7 @@ app.get('/list-payments', authenticateToken, async (req, res) => {
   }
 });
 
+// === RECENT TRANSACTIONS ===
 app.get('/recent-transactions', authenticateToken, async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -474,6 +472,7 @@ app.get('/recent-transactions', authenticateToken, async (req, res) => {
   }
 });
 
+// === WITHDRAW WALLET ===
 app.post('/withdraw-wallet', authenticateToken, async (req, res) => {
   const { amount, currency } = req.body;
   try {
@@ -508,41 +507,7 @@ app.post('/withdraw-wallet', authenticateToken, async (req, res) => {
   }
 });
 
-app.post('/request-payment', authenticateToken, async (req, res) => {
-  const { amount, currency, target_email } = req.body;
-  const user_id = req.claims.user_id;
-  try {
-    const { rows: targetUser } = await pool.query('SELECT id FROM users WHERE email = $1', [target_email]);
-    if (targetUser.length === 0) {
-      return res.status(404).json({ error: 'Target user not found' });
-    }
-    const target_id = targetUser[0].id;
-    await pool.query(
-      'INSERT INTO payment_requests (id, requester_id, target_id, amount, currency, status) VALUES ($1, $2, $3, $4, $5, $6)',
-      [uuidv4(), user_id, target_id, amount, currency, 'pending']
-    );
-    const { rows: requesterUser } = await pool.query('SELECT email FROM users WHERE id = $1', [user_id]);
-    const requester_email = requesterUser[0]?.email || 'unknown';
-    await pool.query(
-      'INSERT INTO notifications (user_id, message, created_at) VALUES ($1, $2, NOW())',
-      [target_id, `Payment requested: ${amount} ${currency} from ${requester_email}`]
-    );
-    const ws = clients.get(target_id);
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        event: 'payment_requested',
-        amount,
-        currency,
-        requester_email,
-        message: `Payment requested: ${amount} ${currency} from ${requester_email}`
-      }));
-    }
-    res.json({ status: 'request_created' });
-  } catch (err) {
-    res.status(500).json({ error: `Error: ${err.message}` });
-  }
-});
-
+// === FUND WALLET ===
 app.post('/fund-wallet', authenticateToken, async (req, res) => {
   const { amount, currency } = req.body;
   try {
@@ -575,12 +540,11 @@ app.post('/fund-wallet', authenticateToken, async (req, res) => {
   }
 });
 
+// === USER PREFERENCES ===
 app.get('/user/preferences', authenticateToken, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM users WHERE id = $1', [req.claims.user_id]);
-    if (rows.length === 0) {
-      return res.status(404).json({ error: 'User not found' });
-    }
+    if (rows.length === 0) return res.status(404).json({ error: 'User not found' });
     res.json({
       notificationsEnabled: true,
       theme: 'day',
@@ -594,6 +558,7 @@ app.get('/user/preferences', authenticateToken, async (req, res) => {
   }
 });
 
+// === CRYPTO TRANSFER ===
 app.post('/crypto-transfer', authenticateToken, async (req, res) => {
   try {
     const { to_address, amount, currency } = req.body;
@@ -635,6 +600,7 @@ app.post('/crypto-transfer', authenticateToken, async (req, res) => {
   }
 });
 
+// === TRANSFER ===
 app.post('/transfer', authenticateToken, async (req, res) => {
   try {
     const { to_wallet, amount } = req.body;
@@ -658,7 +624,7 @@ app.post('/transfer', authenticateToken, async (req, res) => {
       'UPDATE wallets SET balance = balance + $1 WHERE user_id = $2 AND currency = $3',
       [amount, to_wallet, 'EUR']
     );
-    res.json({ message: `✅ ${amount} transferred to ${to_wallet}` });
+    res.json({ message: `€${amount} transferred to ${to_wallet}` });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
