@@ -59,9 +59,20 @@ wss.on('connection', (ws) => {
 
 console.log('BUBBLES LIVE!');
 
-// CORS
+// CORS — FIXED!
 app.use(cors({
-  origin: process.env.NODE_ENV === 'production' ? 'https://chatpay-frontend.onrender.com' : 'http://localhost:3000',
+  origin: (origin, callback) => {
+    const allowed = [
+      'https://chatpay-frontend.onrender.com',
+      'http://localhost:3000',
+      'http://127.0.0.1:3000'
+    ];
+    if (!origin || allowed.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('CORS not allowed'));
+    }
+  },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
