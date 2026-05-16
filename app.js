@@ -30,6 +30,7 @@ wss.on('connection', (ws) => {
 ws.on('message', async (data) => {
   try {
     const msg = JSON.parse(data);
+    console.log('WS MESSAGE:', msg);
 
     if (msg.user_id) {
       clients.set(msg.user_id, ws);
