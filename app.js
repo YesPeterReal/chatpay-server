@@ -39,10 +39,29 @@ wss.on('connection', (ws) => {
       }
 
       const convId = msg.conversation_id;
-      if (conversations[convId]) {
-        conversations[convId].forEach(client => {
-          if (client.readyState === WebSocket.OPEN && client !== ws) {
-            client.send(data);
+      if (msg.type === 'chat_message') {
+        const existingConversation = await pool.query(
+          'SELECT id FROM conversations WHERE id = $1',
+          [convId]
+       );
+      
+         if (exixtingConversation.row.lenght === 0) {
+           await pool.query(
+              'INSERT INTO conversations (id) VALUES ($1)',
+              [convId]
+         );
+
+         await pool.query(
+            `INSERT INTO conversation_participants (conversation_id, user_id)
+             VALUES ($1, $2), ($1, $3)`,
+            [convId, msg.sender_id, msg.message]
+           );      
+          }
+
+         if (conversations[convId]) {
+           conversations[convId].forEach(client => {
+             if (client.readyState === webSocket.OPEN && client !== ws) {
+               client.send(data);
           }
         });
       }
