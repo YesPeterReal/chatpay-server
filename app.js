@@ -27,48 +27,77 @@ const conversations = {}; // { convId: [ws1, ws2] }
 wss.on('connection', (ws) => {
   console.log('WebSocket connected');
 
-  ws.on('message', async (data) => {
-    try {
-      const msg = JSON.parse(data);
-      if (msg.user_id) clients.set(msg.user_id, ws);
+ws.on('message', async (data) => {
+  try {
+    const msg = JSON.parse(data);
 
-      if (msg.type === 'join') {
-        const convId = msg.conversation_id;
-        if (!conversations[convId]) conversations[convId] = [];
-        conversations[convId].push(ws);
-      }
-
-      const convId = msg.conversation_id;
-      if (msg.type === 'chat_message') {
-        const existingConversation = await pool.query(
-          'SELECT id FROM conversations WHERE id = $1',
-          [convId]
-       );
-      
-         if (exixtingConversation.row.lenght === 0) {
-           await pool.query(
-              'INSERT INTO conversations (id) VALUES ($1)',
-              [convId]
-         );
-
-         await pool.query(
-            `INSERT INTO conversation_participants (conversation_id, user_id)
-             VALUES ($1, $2), ($1, $3)`,
-            [convId, msg.sender_id, msg.message]
-           );      
-          }
-
-         if (conversations[convId]) {
-           conversations[convId].forEach(client => {
-             if (client.readyState === webSocket.OPEN && client !== ws) {
-               client.send(data);
-          }
-        });
-      }
-    } catch (err) {
-      // Silent catch — bad message, ignore
+    if (msg.user_id) {
+      clients.set(msg.user_id, ws);
     }
-  });
+
+    if (msg.type === 'join') {
+      const convId = msg.conversation_id;
+
+      if (!conversations[convId]) {
+        conversations[convId] = [];
+      }
+
+      conversations[convId].push(ws);
+    }
+
+    const convId = msg.conversation_id;
+
+    if (msg.type === 'chat_message') {
+
+      // CHECK CONVERSATION
+      const existingConversation = await pool.query(
+        'SELECT id FROM conversations WHERE id = $1',
+        [convId]
+      );
+
+      // CREATE CONVERSATION IF NOT EXISTS
+      if (existingConversation.rows.length === 0) {
+
+        await pool.query(
+          'INSERT INTO conversations (id) VALUES ($1)',
+          [convId]
+        );
+
+        await pool.query(
+          `INSERT INTO conversation_participants
+          (conversation_id, user_id)
+          VALUES ($1, $2), ($1, $3)`,
+          [convId, msg.sender_id, msg.receiver_id]
+        );
+      }
+
+      // SAVE MESSAGE
+      await pool.query(
+        `INSERT INTO messages
+        (conversation_id, sender_id, message)
+        VALUES ($1, $2, $3)`,
+        [convId, msg.sender_id, msg.message]
+      );
+    }
+
+    // REALTIME RELAY
+    if (conversations[convId]) {
+      conversations[convId].forEach(client => {
+
+        if (
+          client.readyState === WebSocket.OPEN &&
+          client !== ws
+        ) {
+          client.send(data);
+        }
+
+      });
+    }
+
+  } catch (err) {
+    console.log('WS error:', err.message);
+  }
+});
 
   ws.on('close', () => {
     for (const [user_id, client] of clients.entries()) {
