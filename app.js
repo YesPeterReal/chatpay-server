@@ -27,15 +27,17 @@ const conversations = {}; // { convId: [ws1, ws2] }
 wss.on('connection', (ws) => {
   console.log('WebSocket connected');
 
-  ws.on('message', (data) => {
+  ws.on('message', async (data) => {
     try {
       const msg = JSON.parse(data);
       if (msg.user_id) clients.set(msg.user_id, ws);
+
       if (msg.type === 'join') {
         const convId = msg.conversation_id;
         if (!conversations[convId]) conversations[convId] = [];
         conversations[convId].push(ws);
       }
+
       const convId = msg.conversation_id;
       if (conversations[convId]) {
         conversations[convId].forEach(client => {
@@ -44,7 +46,9 @@ wss.on('connection', (ws) => {
           }
         });
       }
-    } catch (err) {}
+    } catch (err) {
+      // Silent catch — bad message, ignore
+    }
   });
 
   ws.on('close', () => {
@@ -98,9 +102,12 @@ pool.connect((err) => {
   console.log('DB connected!');
 
   pool.query(`
-    -- USERS: NO DEFAULT UUID
+    -- Enable uuid extension for gen_random_uuid
+    CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+    -- USERS
     CREATE TABLE IF NOT EXISTS users (
-      id uuid PRIMARY KEY,
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       email VARCHAR(255) UNIQUE NOT NULL,
       password TEXT NOT NULL,
       name VARCHAR(255) NOT NULL,
@@ -110,9 +117,9 @@ pool.connect((err) => {
       dob DATE
     );
 
-    -- WALLETS: NO DEFAULT UUID
+    -- WALLETS
     CREATE TABLE IF NOT EXISTS wallets (
-      id uuid PRIMARY KEY,
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       user_id uuid NOT NULL,
       balance NUMERIC(15,2) DEFAULT 0,
       currency VARCHAR(3) NOT NULL,
@@ -137,7 +144,7 @@ pool.connect((err) => {
 
     -- TRANSACTIONS
     CREATE TABLE IF NOT EXISTS transactions (
-      id uuid PRIMARY KEY,
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       code VARCHAR(20) UNIQUE NOT NULL,
       requester_id uuid NOT NULL,
       sender_id uuid,
@@ -154,16 +161,32 @@ pool.connect((err) => {
 
     -- NOTIFICATIONS
     CREATE TABLE IF NOT EXISTS notifications (
-      id uuid PRIMARY KEY,
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       user_id uuid NOT NULL,
       message TEXT NOT NULL,
       is_read BOOLEAN DEFAULT FALSE,
       created_at TIMESTAMP DEFAULT NOW(),
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
+
+    -- PAYMENT REQUESTS (extra table from your online DB)
+    CREATE TABLE IF NOT EXISTS payment_requests (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      requester_id uuid NOT NULL,
+      target_id uuid NOT NULL,
+      amount NUMERIC(15,2) NOT NULL,
+      currency VARCHAR(3) NOT NULL,
+      status VARCHAR(20) DEFAULT 'pending',
+      created_at TIMESTAMP DEFAULT NOW(),
+      FOREIGN KEY (requester_id) REFERENCES users(id),
+      FOREIGN KEY (target_id) REFERENCES users(id)
+    );
   `, (err) => {
-    if (err) console.error('Table error:', err);
-    else console.log('Tables ready!');
+    if (err) {
+      console.error('Table creation failed:', err.message);
+    } else {
+      console.log('Tables ready! All 6 tables created locally!');
+    }
   });
 });
 
@@ -179,28 +202,24 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// === /signup — FIXED WITH uuidv4()! ===
+// === /signup ===
 app.post('/signup', async (req, res) => {
   const { name, surname, email, password, gender, phone, dob } = req.body;
   try {
     if (!email || !password || !name || !surname) {
       return res.status(400).json({ error: 'Required fields missing' });
     }
-
     const hashedPassword = await bcrypt.hash(password, 10);
-    const userId = uuidv4(); // ← NODE GENERATES ID!
-
+    const userId = uuidv4();
     const { rows } = await pool.query(
       'INSERT INTO users (id, email, password, name, surname, gender, phone, dob) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id',
       [userId, email, hashedPassword, name, surname, gender, phone, dob]
     );
-
     const walletId = uuidv4();
     await pool.query(
       'INSERT INTO wallets (id, user_id, balance, currency, status) VALUES ($1, $2, 0, $3, $4)',
       [walletId, userId, 'EUR', 'active']
     );
-
     res.json({ message: 'Signup successful!', user_id: userId });
   } catch (err) {
     console.error('Signup error:', err);
@@ -216,10 +235,8 @@ app.post('/signin', async (req, res) => {
     if (!email || !password) return res.status(400).json({ error: 'Required' });
     const { rows } = await pool.query('SELECT id, password FROM users WHERE email = $1', [email]);
     if (rows.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
-
     const valid = await bcrypt.compare(password, rows[0].password);
     if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
-
     const token = jwt.sign({ user_id: rows[0].id }, process.env.JWT_SECRET || 'fallback_secret', { expiresIn: '1h' });
     res.json({ message: 'Signed in', token, user_id: rows[0].id });
   } catch (err) {
