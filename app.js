@@ -34,6 +34,7 @@ ws.on('message', async (data) => {
 
     if (msg.user_id) {
       clients.set(msg.user_id, ws);
+      console.log('ACTIVE CONNECTIONS:', [...clients.keys()]);
     }
 
     if (msg.type === 'join') {
