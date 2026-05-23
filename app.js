@@ -157,15 +157,16 @@ pool.connect((err) => {
 
     -- USERS
     CREATE TABLE IF NOT EXISTS users (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      email VARCHAR(255) UNIQUE NOT NULL,
-      password TEXT NOT NULL,
-      name VARCHAR(255) NOT NULL,
-      surname VARCHAR(255) NOT NULL,
-      phone VARCHAR(20),
-      gender VARCHAR(50),
-      dob DATE
-    );
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    email VARCHAR(255) UNIQUE NOT NULL,
+    username VARCHAR(50) UNIQUE NOT NULL,
+    password TEXT NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    surname VARCHAR(255) NOT NULL,
+    phone VARCHAR(20),
+    gender VARCHAR(50),
+    dob DATE
+  );
 
     -- WALLETS
     CREATE TABLE IF NOT EXISTS wallets (
