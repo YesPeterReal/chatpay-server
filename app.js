@@ -232,6 +232,45 @@ pool.connect((err) => {
       FOREIGN KEY (requester_id) REFERENCES users(id),
       FOREIGN KEY (target_id) REFERENCES users(id)
     );
+
+          -- CONVERSATIONS
+    CREATE TABLE IF NOT EXISTS conversations (
+      id uuid PRIMARY KEY,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+
+    -- CONVERSATION PARTICIPANTS
+    CREATE TABLE IF NOT EXISTS conversation_participants (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      conversation_id uuid NOT NULL,
+      user_id uuid NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW(),
+
+      FOREIGN KEY (conversation_id)
+      REFERENCES conversations(id)
+      ON DELETE CASCADE,
+
+      FOREIGN KEY (user_id)
+      REFERENCES users(id)
+      ON DELETE CASCADE
+    );
+
+    -- MESSAGES
+    CREATE TABLE IF NOT EXISTS messages (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      conversation_id uuid NOT NULL,
+      sender_id uuid NOT NULL,
+      message TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW(),
+
+      FOREIGN KEY (conversation_id)
+      REFERENCES conversations(id)
+      ON DELETE CASCADE,
+
+      FOREIGN KEY (sender_id)
+      REFERENCES users(id)
+      ON DELETE CASCADE
+    );
   `, (err) => {
     if (err) {
       console.error('Table creation failed:', err.message);
@@ -255,16 +294,16 @@ const authenticateToken = (req, res, next) => {
 
 // === /signup ===
 app.post('/signup', async (req, res) => {
-  const { name, surname, email, password, gender, phone, dob } = req.body;
+  const { name, surname, username, email, password, gender, phone, dob } = req.body;
   try {
-    if (!email || !password || !name || !surname) {
+    if (!name || !surname || !username || !email || !password || !phone || !dob) {
       return res.status(400).json({ error: 'Required fields missing' });
     }
     const hashedPassword = await bcrypt.hash(password, 10);
     const userId = uuidv4();
     const { rows } = await pool.query(
-      'INSERT INTO users (id, email, password, name, surname, gender, phone, dob) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id',
-      [userId, email, hashedPassword, name, surname, gender, phone, dob]
+      'INSERT INTO users (id, email, username, password, name, surname, gender, phone, dob) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id',
+      [userId, email, username, hashedPassword, name, surname, gender, phone, dob]
     );
     const walletId = uuidv4();
     await pool.query(
@@ -295,6 +334,89 @@ app.post('/signin', async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
+
+  // === SEARCH USERS ===
+app.get('/users/search', authenticateToken, async (req, res) => {
+
+  try {
+
+    const query = req.query.q;
+
+    if (!query) {
+      return res.json([]);
+    }
+
+    const { rows } = await pool.query(
+      `
+      SELECT
+        id,
+        username,
+        name,
+        surname,
+        email
+      FROM users
+      WHERE
+        LOWER(username) LIKE LOWER($1)
+        OR LOWER(name) LIKE LOWER($1)
+        OR LOWER(email) LIKE LOWER($1)
+      LIMIT 20
+      `,
+      [`%${query}%`]
+    );
+
+    res.json(rows);
+
+  } catch (err) {
+
+    console.log(err);
+
+    res.status(500).json({
+      error: 'Search failed'
+    });
+
+  }
+
+});
+
+// === LOAD MESSAGES ===
+app.get(
+  '/messages/:conversationId',
+  authenticateToken,
+  async (req, res) => {
+
+    try {
+
+      const { conversationId } = req.params;
+
+      const { rows } = await pool.query(
+        `
+        SELECT
+          id,
+          conversation_id,
+          sender_id,
+          message,
+          created_at
+        FROM messages
+        WHERE conversation_id = $1
+        ORDER BY created_at ASC
+        `,
+        [conversationId]
+      );
+
+      res.json(rows);
+
+    } catch (err) {
+
+      console.log(err);
+
+      res.status(500).json({
+        error: 'Failed to load messages'
+      });
+
+    }
+
+  }
+);
 
 // === WALLET BALANCE ===
 app.get('/wallet/balance', authenticateToken, async (req, res) => {
