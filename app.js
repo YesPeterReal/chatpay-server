@@ -302,7 +302,7 @@ app.post('/signup', async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
     const userId = uuidv4();
     const { rows } = await pool.query(
-      'INSERT INTO users (id, email, username, password, name, surname, gender, phone, dob) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id',
+      'INSERT INTO users (id, email, username, password, name, surname, gender, phone, dob) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id',
       [userId, email, username, hashedPassword, name, surname, gender, phone, dob]
     );
     const walletId = uuidv4();
