@@ -30,55 +30,168 @@ wss.on('connection', (ws) => {
 ws.on('message', async (data) => {
   try {
     const msg = JSON.parse(data);
+
+const convId =
+  msg.conversation_id;
+
+  if (
+    !ws.userId &&
+    msg.type !== 'auth'
+) {
+
+  ws.close();
+
+  return;
+
+}
+    
+     if (msg.type === 'auth') {
+
+  // ADD THIS
+  if (ws.userId) {
+
+    ws.close();
+
+    return;
+
+  }
+
+  try {
+
+    const claims = jwt.verify(
+      msg.token,
+      process.env.JWT_SECRET
+    );
+
+    ws.userId = claims.user_id;
+
+    clients.set(
+      claims.user_id,
+      ws
+    );
+
+  } catch {
+
+    ws.close();
+
+  }
+
+  return;
+}
+
     console.log('WS MESSAGE:', msg);
 
-    if (msg.user_id) {
-      clients.set(msg.user_id, ws);
-      console.log('ACTIVE CONNECTIONS:', [...clients.keys()]);
-    }
-
     if (msg.type === 'join') {
-      const convId = msg.conversation_id;
 
       if (!conversations[convId]) {
         conversations[convId] = [];
       }
 
-      conversations[convId].push(ws);
-    }
+      if (!conversations[convId].includes(ws)) {
+      
+       const access = await pool.query(
+       `
+       SELECT 1
+       FROM conversation_participants
+       WHERE conversation_id = $1
+       AND user_id = $2
+       LIMIT 1
+       `,
+      [
+       convId,
+       ws.userId
+      ]
+      );
 
-    const convId = msg.conversation_id;
+      if (access.rows.length === 0) {
+
+      ws.close();
+
+      return;
+
+      }
+         conversations[convId].push(ws);
+       }
+      }
 
     if (msg.type === 'chat_message') {
 
-      // CHECK CONVERSATION
-      const existingConversation = await pool.query(
-        'SELECT id FROM conversations WHERE id = $1',
-        [convId]
-      );
-
       // CREATE CONVERSATION IF NOT EXISTS
-      if (existingConversation.rows.length === 0) {
+     const conversation =
+await pool.query(
+`
+SELECT id
+FROM conversations
+WHERE id = $1
+`,
+[convId]
+);
 
-        await pool.query(
-          'INSERT INTO conversations (id) VALUES ($1)',
-          [convId]
-        );
+  const access =
+await pool.query(
+`
+SELECT 1
+FROM conversation_participants
+WHERE conversation_id = $1
+AND user_id = $2
+LIMIT 1
+`,
+[
+  convId,
+  ws.userId
+]
+);
 
-        await pool.query(
-          `INSERT INTO conversation_participants
-          (conversation_id, user_id)
-          VALUES ($1, $2), ($1, $3)`,
-          [convId, msg.sender_id, msg.receiver_id]
-        );
-      }
+if (
+  access.rows.length === 0
+) {
 
+  ws.close();
+
+  return;
+
+}
+
+if (
+conversation.rows.length === 0
+) {
+
+  ws.send(
+    JSON.stringify({
+      error:
+      'Conversation does not exist'
+    })
+  );
+
+  return;
+
+}
+
+    if (
+  typeof msg.message !== 'string'
+) {
+
+  ws.close();
+
+  return;
+
+}
+
+if (
+  msg.message.length > 5000
+) {
+
+  ws.close();
+
+  return;
+
+}
       // SAVE MESSAGE
       await pool.query(
         `INSERT INTO messages
         (conversation_id, sender_id, message)
         VALUES ($1, $2, $3)`,
-        [convId, msg.sender_id, msg.message]
+        [convId, ws.userId, msg.message]
       );
     }
 
@@ -90,7 +203,16 @@ ws.on('message', async (data) => {
           client.readyState === WebSocket.OPEN &&
           client !== ws
         ) {
-          client.send(data);
+          client.send(
+   JSON.stringify({
+  type:'chat_message',
+  conversation_id: convId,
+  sender_id: ws.userId,
+  message: msg.message,
+  created_at:
+    new Date().toISOString()
+})
+);
         }
 
       });
@@ -163,10 +285,38 @@ pool.connect((err) => {
     password TEXT NOT NULL,
     name VARCHAR(255) NOT NULL,
     surname VARCHAR(255) NOT NULL,
-    phone VARCHAR(20),
+    phone VARCHAR(20) UNIQUE,
     gender VARCHAR(50),
     dob DATE
   );
+    
+    -- CONTACTS
+    CREATE INDEX IF NOT EXISTS idx_users_phone
+    ON users(phone);
+
+    CREATE TABLE IF NOT EXISTS contacts (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+
+    owner_id uuid NOT NULL,
+    contact_user_id uuid,
+
+    name VARCHAR(255) NOT NULL,
+    phone VARCHAR(20) NOT NULL,
+
+    created_at TIMESTAMP DEFAULT NOW(),
+
+    FOREIGN KEY (owner_id)
+    REFERENCES users(id)
+    ON DELETE CASCADE,
+
+    FOREIGN KEY (contact_user_id)
+    REFERENCES users(id)
+    ON DELETE SET NULL
+  );
+
+CREATE UNIQUE INDEX IF NOT EXISTS
+idx_contacts_owner_phone
+ON contacts(owner_id, phone);
 
     -- WALLETS
     CREATE TABLE IF NOT EXISTS wallets (
@@ -255,6 +405,13 @@ pool.connect((err) => {
       ON DELETE CASCADE
     );
 
+       CREATE UNIQUE INDEX IF NOT EXISTS
+        idx_conversation_user_unique
+        ON conversation_participants(
+        conversation_id,
+        user_id
+      );
+
     -- MESSAGES
     CREATE TABLE IF NOT EXISTS messages (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -313,7 +470,7 @@ app.post('/signup', async (req, res) => {
     res.json({ message: 'Signup successful!', user_id: userId });
   } catch (err) {
     console.error('Signup error:', err);
-    if (err.code === '23505') return res.status(400).json({ error: 'Email already exists' });
+    if (err.code === '23505') return res.status(400).json({ error: 'Email, username, or phone already exists' });
     res.status(500).json({ error: 'Signup failed' });
   }
 });
@@ -378,6 +535,286 @@ app.get('/users/search', authenticateToken, async (req, res) => {
 
 });
 
+// === LOOKUP USER BY PHONE ===
+app.get(
+  '/users',
+  authenticateToken,
+  async (req, res) => {
+
+    try {
+
+      const phone = req.query.phone;
+
+      if (!phone) {
+        return res.json({
+          exists: false
+        });
+      }
+
+      const { rows } = await pool.query(
+        `
+        SELECT
+          id,
+          name,
+          surname,
+          phone
+        FROM users
+        WHERE phone = $1
+        LIMIT 1
+        `,
+        [phone]
+      );
+
+      if (rows.length === 0) {
+        return res.json({
+          exists: false
+        });
+      }
+
+      return res.json({
+        exists: true,
+        user: {
+          id: rows[0].id,
+          name:
+            `${rows[0].name} ${rows[0].surname}`,
+          phone: rows[0].phone,
+        },
+      });
+
+    } catch (err) {
+
+      console.log(err);
+
+      res.status(500).json({
+        error: 'Lookup failed'
+      });
+
+    }
+  }
+);
+
+// === SAVE CONTACT ===
+app.post(
+  '/contacts',
+  authenticateToken,
+  async (req, res) => {
+
+    try {
+
+      const {
+        name,
+        phone,
+        contact_user_id
+      } = req.body;
+
+      const owner_id =
+        req.claims.user_id;
+
+     const existing =
+       await pool.query(
+       `
+       SELECT id
+       FROM contacts
+       WHERE owner_id = $1
+       AND phone = $2
+        `,
+       [owner_id, phone]
+      );
+
+      if (existing.rows.length > 0) {
+
+       return res.status(409).json({
+        error: 'Contact already exists'
+       });
+
+      }
+
+
+      const { rows } =
+        await pool.query(
+          `
+          INSERT INTO contacts
+          (
+            owner_id,
+            contact_user_id,
+            name,
+            phone
+          )
+          VALUES
+          ($1,$2,$3,$4)
+          RETURNING *
+          `,
+          [
+            owner_id,
+            contact_user_id || null,
+            name,
+            phone
+          ]
+        );
+
+      res.json(rows[0]);
+
+    } catch (err) {
+
+      console.log(
+        'CONTACT SAVE ERROR:',
+        err
+      );
+
+      res.status(500).json({
+        error: 'Failed to save contact'
+      });
+
+    }
+
+  }
+);
+
+// === LOAD CONTACTS ===
+app.get(
+  '/contacts',
+  authenticateToken,
+  async (req, res) => {
+
+    try {
+
+      const owner_id =
+        req.claims.user_id;
+
+      const { rows } =
+        await pool.query(
+          `
+          SELECT *
+          FROM contacts
+          WHERE owner_id = $1
+          ORDER BY name ASC
+          `,
+          [owner_id]
+        );
+
+      res.json(rows);
+
+    } catch (err) {
+
+      console.log(err);
+
+      res.status(500).json({
+        error: 'Failed to load contacts'
+      });
+
+    }
+
+  }
+);
+
+// === CREATE OR GET CONVERSATION ===
+app.post(
+  '/conversations',
+  authenticateToken,
+  async (req, res) => {
+
+    try {
+
+      const senderId =
+        req.claims.user_id;
+
+      const {
+        receiverId
+      } = req.body;
+
+ // VERIFY RECEIVER EXISTS
+const receiver = await pool.query(
+`
+SELECT id
+FROM users
+WHERE id = $1
+`,
+[receiverId]
+);
+
+if (receiver.rows.length === 0) {
+  return res.status(404).json({
+    error: 'User not found'
+  });
+}
+
+      // Find existing conversation
+      const existing =
+        await pool.query(
+          `
+          SELECT cp1.conversation_id
+          FROM conversation_participants cp1
+          JOIN conversation_participants cp2
+            ON cp1.conversation_id =
+               cp2.conversation_id
+          WHERE cp1.user_id = $1
+          AND cp2.user_id = $2
+          LIMIT 1
+          `,
+          [senderId, receiverId]
+        );
+
+      if (
+        existing.rows.length > 0
+      ) {
+
+        return res.json({
+          conversationId:
+            existing.rows[0]
+              .conversation_id
+        });
+
+      }
+
+      const conversationId =
+        uuidv4();
+
+      await pool.query(
+        `
+        INSERT INTO conversations
+        (id)
+        VALUES ($1)
+        `,
+        [conversationId]
+      );
+
+      await pool.query(
+        `
+        INSERT INTO
+        conversation_participants
+        (
+          conversation_id,
+          user_id
+        )
+        VALUES
+        ($1,$2),
+        ($1,$3)
+        `,
+        [
+          conversationId,
+          senderId,
+          receiverId
+        ]
+      );
+
+      res.json({
+        conversationId
+      });
+
+    } catch (err) {
+
+      console.log(err);
+
+      res.status(500).json({
+        error:
+          'Conversation creation failed'
+      });
+
+    }
+
+  }
+);
+
 // === LOAD MESSAGES ===
 app.get(
   '/messages/:conversationId',
@@ -388,20 +825,42 @@ app.get(
 
       const { conversationId } = req.params;
 
-      const { rows } = await pool.query(
-        `
-        SELECT
-          id,
-          conversation_id,
-          sender_id,
-          message,
-          created_at
-        FROM messages
-        WHERE conversation_id = $1
-        ORDER BY created_at ASC
-        `,
-        [conversationId]
-      );
+      // SECURITY CHECK
+      const access = await pool.query(
+`
+SELECT 1
+FROM conversation_participants
+WHERE conversation_id = $1
+AND user_id = $2
+LIMIT 1
+`,
+[
+  conversationId,
+  req.claims.user_id
+]
+);
+
+if (access.rows.length === 0) {
+  return res.status(403).json({
+    error: 'Access denied'
+  });
+}
+
+// LOAD MESSAGES ONLY IF USER BELONGS
+const { rows } = await pool.query(
+`
+SELECT
+  id,
+  conversation_id,
+  sender_id,
+  message,
+  created_at
+FROM messages
+WHERE conversation_id = $1
+ORDER BY created_at ASC
+`,
+[conversationId]
+);
 
       res.json(rows);
 
