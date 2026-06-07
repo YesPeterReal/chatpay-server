@@ -35,26 +35,22 @@ const convId =
   msg.conversation_id;
 
   if (
-    !ws.userId &&
-    msg.type !== 'auth'
+  !ws.userId &&
+  msg.type !== 'auth'
 ) {
+
+  console.log(
+    'WS CLOSED BEFORE AUTH:',
+    msg
+  );
 
   ws.close();
 
   return;
 
-}
-    
+} 
+ 
      if (msg.type === 'auth') {
-
-  // ADD THIS
-  if (ws.userId) {
-
-    ws.close();
-
-    return;
-
-  }
 
   try {
 
@@ -65,9 +61,17 @@ const convId =
 
     ws.userId = claims.user_id;
 
+    console.log('AUTH SUCCESS', claims.user_id);
+
     clients.set(
       claims.user_id,
       ws
+    );
+
+    ws.send(
+      JSON.stringify({
+        type: 'auth_ok'
+      })
     );
 
   } catch {
