@@ -21,220 +21,409 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/ws' });
 
 // WebSocket clients map
-const clients = new Map(); // user_id → ws
-const conversations = {}; // { convId: [ws1, ws2] }
+const clients = new Map(); // user_id -> ws
+const conversations = new Map(); // conversation_id -> Set<ws>
 
 wss.on('connection', (ws) => {
+
   console.log('WebSocket connected');
 
-ws.on('message', async (data) => {
-  try {
-    const msg = JSON.parse(data);
-
-const convId =
-  msg.conversation_id;
-
-  if (
-  !ws.userId &&
-  msg.type !== 'auth'
-) {
-
-  console.log(
-    'WS CLOSED BEFORE AUTH:',
-    msg
-  );
-
-  ws.close();
-
-  return;
-
-} 
- 
-     if (msg.type === 'auth') {
-
-  try {
-
-    const claims = jwt.verify(
-      msg.token,
-      process.env.JWT_SECRET
-    );
-
-    ws.userId = claims.user_id;
-
-    console.log('AUTH SUCCESS', claims.user_id);
-
-    clients.set(
-      claims.user_id,
-      ws
-    );
-
-    ws.send(
-      JSON.stringify({
-        type: 'auth_ok'
-      })
-    );
-
-  } catch {
-
-    ws.close();
-
-  }
-
-  return;
-}
-
-    console.log('WS MESSAGE:', msg);
-
-    if (msg.type === 'join') {
-
-      if (!conversations[convId]) {
-        conversations[convId] = [];
-      }
-
-      if (!conversations[convId].includes(ws)) {
-      
-       const access = await pool.query(
-       `
-       SELECT 1
-       FROM conversation_participants
-       WHERE conversation_id = $1
-       AND user_id = $2
-       LIMIT 1
-       `,
-      [
-       convId,
-       ws.userId
-      ]
-      );
-
-      if (access.rows.length === 0) {
-
+  const authTimeout = setTimeout(() => {
+    if (!ws.userId) {
       ws.close();
-
-      return;
-
-      }
-         conversations[convId].push(ws);
-       }
-      }
-
-    if (msg.type === 'chat_message') {
-
-      // CREATE CONVERSATION IF NOT EXISTS
-     const conversation =
-await pool.query(
-`
-SELECT id
-FROM conversations
-WHERE id = $1
-`,
-[convId]
-);
-
-  const access =
-await pool.query(
-`
-SELECT 1
-FROM conversation_participants
-WHERE conversation_id = $1
-AND user_id = $2
-LIMIT 1
-`,
-[
-  convId,
-  ws.userId
-]
-);
-
-if (
-  access.rows.length === 0
-) {
-
-  ws.close();
-
-  return;
-
-}
-
-if (
-conversation.rows.length === 0
-) {
-
-  ws.send(
-    JSON.stringify({
-      error:
-      'Conversation does not exist'
-    })
-  );
-
-  return;
-
-}
-
-    if (
-  typeof msg.message !== 'string'
-) {
-
-  ws.close();
-
-  return;
-
-}
-
-if (
-  msg.message.length > 5000
-) {
-
-  ws.close();
-
-  return;
-
-}
-      // SAVE MESSAGE
-      await pool.query(
-        `INSERT INTO messages
-        (conversation_id, sender_id, message)
-        VALUES ($1, $2, $3)`,
-        [convId, ws.userId, msg.message]
-      );
     }
+  }, 10000);
 
-    // REALTIME RELAY
-    if (conversations[convId]) {
-      conversations[convId].forEach(client => {
+  ws.on('message', async (data) => {
 
-        if (
-          client.readyState === WebSocket.OPEN &&
-          client !== ws
-        ) {
-          client.send(
-   JSON.stringify({
-  type:'chat_message',
-  conversation_id: convId,
-  sender_id: ws.userId,
-  message: msg.message,
-  created_at:
-    new Date().toISOString()
-})
-);
+    try {
+
+      // -------------------------
+      // SAFE JSON PARSE
+      // -------------------------
+
+      let msg;
+
+      try {
+        msg = JSON.parse(data);
+      } catch {
+        ws.close();
+        return;
+      }
+
+      const convId = msg.conversation_id;
+
+      // -------------------------
+      // AUTH REQUIRED
+      // -------------------------
+
+      if (
+        !ws.userId &&
+        msg.type !== 'auth'
+      ) {
+
+        ws.close();
+        return;
+
+      }
+
+      // -------------------------
+      // AUTH
+      // -------------------------
+
+      if (msg.type === 'auth') {
+
+        if (ws.userId) {
+          return;
         }
 
-      });
+        if (
+          typeof msg.token !== 'string'
+        ) {
+
+          ws.close();
+          return;
+
+        }
+
+        try {
+
+          const claims = jwt.verify(
+            msg.token,
+            process.env.JWT_SECRET
+          );
+
+          if (!claims?.user_id) {
+            ws.close();
+            return;
+          }
+
+          ws.userId = claims.user_id;
+
+          clearTimeout(authTimeout);
+
+          const existing =
+            clients.get(
+              claims.user_id
+            );
+
+          if (
+            existing &&
+            existing !== ws
+          ) {
+            existing.close();
+          }
+
+          clients.set(
+            claims.user_id,
+            ws
+          );
+
+          ws.send(
+            JSON.stringify({
+              type: 'auth_ok'
+            })
+          );
+
+        } catch {
+
+          ws.close();
+
+        }
+
+        return;
+      }
+
+      // -------------------------
+      // VALIDATE CONVERSATION ID
+      // -------------------------
+
+      if (
+        !convId ||
+        typeof convId !== 'string'
+      ) {
+
+        ws.close();
+        return;
+
+      }
+
+      // -------------------------
+      // JOIN ROOM
+      // -------------------------
+
+      if (msg.type === 'join') {
+
+        const access =
+          await pool.query(
+            `
+            SELECT 1
+            FROM conversation_participants
+            WHERE conversation_id = $1
+            AND user_id = $2
+            LIMIT 1
+            `,
+            [
+              convId,
+              ws.userId
+            ]
+          );
+
+        if (
+          access.rows.length === 0
+        ) {
+
+          ws.close();
+          return;
+
+        }
+
+        if (
+          !conversations.has(convId)
+        ) {
+
+          conversations.set(
+            convId,
+            new Set()
+          );
+
+        }
+
+        conversations
+          .get(convId)
+          .add(ws);
+
+        return;
+      }
+
+      // -------------------------
+      // CHAT MESSAGE
+      // -------------------------
+
+      if (
+        msg.type === 'chat_message'
+      ) {
+
+        const conversation =
+          await pool.query(
+            `
+            SELECT id
+            FROM conversations
+            WHERE id = $1
+            `,
+            [convId]
+          );
+
+        if (
+          conversation.rows.length === 0
+        ) {
+
+          ws.send(
+            JSON.stringify({
+              error:
+                'Conversation does not exist'
+            })
+          );
+
+          return;
+        }
+
+        const access =
+          await pool.query(
+            `
+            SELECT 1
+            FROM conversation_participants
+            WHERE conversation_id = $1
+            AND user_id = $2
+            LIMIT 1
+            `,
+            [
+              convId,
+              ws.userId
+            ]
+          );
+
+        if (
+          access.rows.length === 0
+        ) {
+
+          ws.close();
+          return;
+        }
+
+        // -------------------------
+        // RECEIVER VALIDATION
+        // -------------------------
+
+        if (
+          typeof msg.receiver_id !== 'string' ||
+          !msg.receiver_id.trim()
+        ) {
+
+          ws.close();
+          return;
+        }
+
+        // -------------------------
+        // MESSAGE VALIDATION
+        // -------------------------
+
+        if (
+          typeof msg.message !== 'string'
+        ) {
+
+          ws.close();
+          return;
+        }
+
+        const cleanMessage =
+          msg.message.trim();
+
+        if (
+          cleanMessage.length === 0
+        ) {
+          return;
+        }
+
+        if (
+          cleanMessage.length > 5000
+        ) {
+
+          ws.close();
+          return;
+        }
+
+        // -------------------------
+        // SAVE MESSAGE
+        // -------------------------
+
+        const saved =
+          await pool.query(
+            `
+            INSERT INTO messages
+            (
+              conversation_id,
+              sender_id,
+              message
+            )
+            VALUES ($1, $2, $3)
+            RETURNING id, created_at
+            `,
+            [
+              convId,
+              ws.userId,
+              cleanMessage
+            ]
+          );
+
+        const payload = {
+          type: 'chat_message',
+          id: saved.rows[0].id,
+          conversation_id: convId,
+          sender_id: ws.userId,
+          message: cleanMessage,
+          created_at:
+            saved.rows[0].created_at
+        };
+
+        // -------------------------
+        // ROOM DELIVERY
+        // -------------------------
+
+        const room =
+          conversations.get(convId);
+
+        if (room) {
+
+          room.forEach(client => {
+
+            if (
+              client.readyState ===
+              WebSocket.OPEN
+            ) {
+
+              client.send(
+                JSON.stringify(payload)
+              );
+
+            }
+
+          });
+
+        }
+
+        // -------------------------
+        // DIRECT DELIVERY
+        // -------------------------
+
+        const receiverSocket =
+          clients.get(
+            msg.receiver_id
+          );
+
+        if (
+          receiverSocket &&
+          receiverSocket !== ws &&
+          receiverSocket.readyState ===
+          WebSocket.OPEN
+        ) {
+
+          receiverSocket.send(
+            JSON.stringify(payload)
+          );
+
+        }
+
+        return;
+      }
+
+    } catch (err) {
+
+      console.log(
+        'WS error:',
+        err?.message || err
+      );
+
     }
 
-  } catch (err) {
-    console.log('WS error:', err.message);
-  }
-});
+  });
 
   ws.on('close', () => {
-    for (const [user_id, client] of clients.entries()) {
-      if (client === ws) clients.delete(user_id);
+
+    clearTimeout(authTimeout);
+
+    for (
+      const [userId, client]
+      of clients.entries()
+    ) {
+
+      if (client === ws) {
+        clients.delete(userId);
+      }
+
     }
-    Object.keys(conversations).forEach(convId => {
-      conversations[convId] = conversations[convId].filter(client => client !== ws);
-    });
+
+    for (
+      const [convId, room]
+      of conversations.entries()
+    ) {
+
+      room.delete(ws);
+
+      if (
+        room.size === 0
+      ) {
+
+        conversations.delete(
+          convId
+        );
+
+      }
+
+    }
+
   });
+
 });
 
 console.log('BUBBLES LIVE!');
